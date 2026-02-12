@@ -39,7 +39,8 @@ async def startup_event():
     print("Loading RAG engine...")
     rag = RAGEngine(
         document_path="arabic_text_and_tables.txt",
-        openai_api_key=openai_api_key
+        openai_api_key=openai_api_key,
+        
     )
     print(f"RAG engine loaded successfully! Total chunks: {len(rag.chunks)}")
 

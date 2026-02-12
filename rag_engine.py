@@ -14,21 +14,237 @@ class Chunk:
     metadata: Dict
 
 
+# ========== NEW CHUNKING FUNCTIONS (INTEGRATED) ==========
+
+def normalize_arabic_indic(text: str) -> str:
+    """Convert Arabic-Indic numerals to Western numerals"""
+    arabic_indic = '٠١٢٣٤٥٦٧٨٩'
+    western = '0123456789'
+    translation = str.maketrans(arabic_indic, western)
+    return text.translate(translation)
+
+
+def is_article_header(line: str) -> bool:
+    """Determine if a line is an article header (not a reference)"""
+    stripped = line.strip()
+    
+    # Too long to be a header
+    if len(stripped) > 200:
+        return False
+    
+    # Skip obvious references - handle both "المادة" and "الما دة" (with space)
+    reference_patterns = [
+        'بالمادة', 'من المادة', 'من هذه المادة',
+        'في المادة', 'على المادة', 'وفق المادة',
+        'المادة رقم', 'نص المادة',
+        'بالما دة', 'من الما دة', 'من هذه الما دة',
+        'في الما دة', 'على الما دة', 'وفق الما دة',
+        'الما دة رقم', 'نص الما دة'
+    ]
+    
+    for pattern in reference_patterns:
+        if pattern in stripped:
+            return False
+    
+    # Check if it matches article header patterns
+    # Handle both "المادة" and "الما دة" (with space between ال and مادة)
+    if re.match(r'^الما?\s*دة\s*[\(\[]?\s*\d+', stripped):
+        return True
+    
+    if re.match(r'^[\(\[]?[^\(\)\[\]]*\d+\s*[\)\]]\s*الما?\s*دة', stripped):
+        return True
+    
+    if stripped.endswith(('المادة', 'الما دة')) and re.search(r'\d+', stripped):
+        return True
+    
+    return False
+
+
+def is_table_header(line: str) -> bool:
+    """Determine if a line is a table header"""
+    stripped = line.strip()
+    
+    # Check for various table header patterns:
+    # - ## جدول رقم (X)
+    # - ### جدول رقم (X)
+    # - ### **الجدول رقم (X)**
+    # - **جدول رقم (X):**
+    # - **الجدول رقم (X):**
+    # - جدول رقم (X):
+    # - استكمال جدول رقم (X) (continuations)
+    
+    # Pattern 1: Markdown headers (## or ###) followed by table reference
+    if re.match(r'^#{2,3}\s*(\*\*)?.*?(ال)?جدول رقم\s*\(', stripped):
+        return True
+    
+    # Pattern 2: Bold markdown table headers
+    if re.match(r'^\*\*.*?(ال)?جدول رقم\s*\(', stripped):
+        return True
+    
+    # Pattern 3: Plain table headers starting with جدول رقم
+    if re.match(r'^(ال)?جدول رقم\s*\(', stripped):
+        # Skip references to tables (not actual table headers)
+        if any(pattern in stripped for pattern in ['بالجدول', 'من الجدول', 'في الجدول', 'على الجدول', 'للجدول', 'وفق الجدول', 'وفقا للجدول']):
+            return False
+        return True
+    
+    # Pattern 4: Table continuations (استكمال)
+    if 'استكمال جدول رقم' in stripped:
+        return True
+    
+    return False
+
+
+def chunk_by_article_and_table(text: str, normalize_numerals: bool = True) -> List[Chunk]:
+    """
+    Chunk Arabic legal document by articles (المادة) and tables (جدول).
+    
+    Handles formats:
+    - المادة (5), (5) المادة, )text 5( المادة
+    - جدول المخالفات, جدول وظائف المهندسين
+    """
+    
+    # Normalize Arabic-Indic numerals
+    if normalize_numerals:
+        text = normalize_arabic_indic(text)
+    
+    lines = text.split('\n')
+    chunk_starts = []
+    
+    for i, line in enumerate(lines):
+        if is_article_header(line):
+            chunk_starts.append((i, line.strip(), 'article'))
+        elif is_table_header(line):
+            chunk_starts.append((i, line.strip(), 'table'))
+    
+    # Create chunks
+    chunks = []
+    
+    for idx, (line_num, header, chunk_type) in enumerate(chunk_starts):
+        start_line = line_num
+        end_line = chunk_starts[idx + 1][0] if idx + 1 < len(chunk_starts) else len(lines)
+        
+        chunk_lines = lines[start_line:end_line]
+        chunk_text = '\n'.join(chunk_lines).strip()
+        
+        # Extract number
+        number_match = re.search(r'\d+', header)
+        number = number_match.group() if number_match else None
+        
+        # Calculate positions
+        start_pos = sum(len(l) + 1 for l in lines[:start_line])
+        end_pos = start_pos + len(chunk_text)
+        
+        chunks.append(
+            Chunk(
+                content=chunk_text,
+                metadata={
+                    'type': chunk_type,
+                    'header': header,
+                    'number': number,
+                    'chunk_size': len(chunk_text),
+                    'start_line': start_line,
+                    'end_line': end_line,
+                    'start_pos': start_pos,
+                    'end_pos': end_pos,
+                    'source': 'Legal_Document'
+                }
+            )
+        )
+    
+    return chunks
+
+
+def sub_chunk_large_articles(chunks: List[Chunk], max_size: int) -> List[Chunk]:
+    """Split large chunks into smaller sub-chunks"""
+    new_chunks = []
+    
+    for chunk in chunks:
+        if chunk.metadata['chunk_size'] <= max_size:
+            new_chunks.append(chunk)
+        else:
+            # Split by paragraphs
+            paragraphs = chunk.content.split('\n')
+            
+            sub_chunk_content = ""
+            sub_chunk_index = 1
+            
+            for para in paragraphs:
+                if len(sub_chunk_content) + len(para) > max_size and sub_chunk_content:
+                    new_chunks.append(
+                        Chunk(
+                            content=sub_chunk_content.strip(),
+                            metadata={
+                                **chunk.metadata,
+                                'subsection': f'part_{sub_chunk_index}',
+                                'chunk_size': len(sub_chunk_content),
+                                'is_subchunk': True,
+                                'original_size': chunk.metadata['chunk_size']
+                            }
+                        )
+                    )
+                    sub_chunk_content = para + "\n"
+                    sub_chunk_index += 1
+                else:
+                    sub_chunk_content += para + "\n"
+            
+            # Add the last sub-chunk
+            if sub_chunk_content.strip():
+                new_chunks.append(
+                    Chunk(
+                        content=sub_chunk_content.strip(),
+                        metadata={
+                            **chunk.metadata,
+                            'subsection': f'part_{sub_chunk_index}',
+                            'chunk_size': len(sub_chunk_content),
+                            'is_subchunk': True,
+                            'original_size': chunk.metadata['chunk_size']
+                        }
+                    )
+                )
+    
+    return new_chunks
+
+
+def normalize_arabic_text(text: str) -> str:
+    """Normalize Arabic text"""
+    text = re.sub(r'\s+', ' ', text)
+    text = text.replace('ـ', '')
+    return text.strip()
+
+
+# ========== RAG ENGINE (UPDATED WITH NEW CHUNKING) ==========
+
 class RAGEngine:
-    def __init__(self, document_path: str, openai_api_key: str):
+    def __init__(self, document_path: str, openai_api_key: str, max_chunk_size: int = 5000):
         """Initialize RAG engine with document and API key"""
-        # Load and process document
+        print("Loading and chunking document...")
+        
+        # Load document
         with open(document_path, "r", encoding="utf-8") as f:
             raw_text = f.read()
         
-        self.chunks = self._split_by_madda_or_table(raw_text)
+        # NEW: Use the improved chunking function
+        self.chunks = chunk_by_article_and_table(raw_text, normalize_numerals=True)
         
+        # Normalize text in chunks
         for c in self.chunks:
-            c.content = self._normalize_arabic(c.content)
-            c.metadata["number"] = self._extract_number(c.metadata["header"])
-            c.metadata["source"] = "Legal_Document"
+            c.content = normalize_arabic_text(c.content)
+        
+        # NEW: Sub-chunk large articles
+        if max_chunk_size:
+            print(f"Sub-chunking articles larger than {max_chunk_size} characters...")
+            original_count = len(self.chunks)
+            self.chunks = sub_chunk_large_articles(self.chunks, max_chunk_size)
+            print(f"Chunks: {original_count} → {len(self.chunks)} (after sub-chunking)")
+        
+        # Print chunking summary
+        articles = sum(1 for c in self.chunks if c.metadata['type'] == 'article')
+        tables = sum(1 for c in self.chunks if c.metadata['type'] == 'table')
+        print(f"Total chunks: {len(self.chunks)} ({articles} articles, {tables} tables)")
         
         # Initialize embedder and FAISS
+        print("Creating embeddings...")
         self.embedder = SentenceTransformer("intfloat/multilingual-e5-large")
         
         texts = [c.content for c in self.chunks]
@@ -41,53 +257,14 @@ class RAGEngine:
         self.id2chunk = {i: c for i, c in enumerate(self.chunks)}
         
         # Initialize BM25
+        print("Initializing BM25...")
         tokenized_corpus = [c.content.split() for c in self.chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
         
         # Initialize OpenAI client
         self.client = OpenAI(api_key=openai_api_key)
-    
-    def _split_by_madda_or_table(self, text: str) -> List[Chunk]:
-        pattern = re.compile(
-            r'(?:^|\n)\s*(?:'
-            r'(?:المادة\s*[\(\[]?\s*\d+\s*[\)\]]?)|'
-            r'(?:[\(\[]?\s*\d+\s*[\)\]]?\s*المادة)|'
-            r'(?:الجدول\s*(?:رقم)?\s*[\(\[]?\s*\d+\s*[\)\]]?)|'
-            r'(?:جدول\s+\S+)'
-            r')',
-            re.MULTILINE
-        )
-
-        matches = list(pattern.finditer(text))
-        chunks = []
-
-        for i, match in enumerate(matches):
-            start = match.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            chunk_text = text[start:end].strip()
-            header = match.group().strip()
-
-            chunk_type = "article" if "مادة" in header else "table"
-
-            chunks.append(
-                Chunk(
-                    content=chunk_text,
-                    metadata={
-                        "type": chunk_type,
-                        "header": header
-                    }
-                )
-            )
-        return chunks
-    
-    def _normalize_arabic(self, text: str) -> str:
-        text = re.sub(r'\s+', ' ', text)
-        text = text.replace('ـ', '')
-        return text.strip()
-    
-    def _extract_number(self, header: str):
-        m = re.search(r'\d+', header)
-        return m.group() if m else None
+        
+        print("✅ RAG engine ready!")
     
     def detect_language(self, text: str) -> str:
         """Simple language detection based on Arabic characters"""
@@ -97,10 +274,8 @@ class RAGEngine:
         if total_chars == 0:
             return "en"
         
-        # If more than 30% Arabic characters, consider it Arabic
         return "ar" if (arabic_chars / total_chars) > 0.3 else "en"
     
-    # ========== NEW: TRANSLATION METHOD ==========
     def translate_to_arabic(self, text: str) -> str:
         """Translate English text to Arabic using GPT-4o-mini"""
         response = self.client.chat.completions.create(
@@ -120,12 +295,17 @@ class RAGEngine:
         )
         return response.choices[0].message.content.strip()
     
-    def retrieve_chunks(self, query: str, top_k=3):
-        # FAISS
+    def retrieve_chunks(self, query: str, top_k=5):
+        """Retrieve relevant chunks using hybrid search (FAISS + BM25)"""
+        # FAISS semantic search
         q_emb = self.embedder.encode([query], normalize_embeddings=True)
-        _, faiss_ids = self.faiss_index.search(q_emb, top_k)
+        faiss_scores, faiss_ids = self.faiss_index.search(q_emb, top_k)
 
-        # BM25
+        # Convert FAISS results to Python native types and filter out invalid indices (-1)
+        faiss_ids_list = [int(idx) for idx in faiss_ids[0] if idx >= 0]
+        faiss_scores_list = [float(score) for score, idx in zip(faiss_scores[0], faiss_ids[0]) if idx >= 0]
+
+        # BM25 keyword search
         bm25_scores = self.bm25.get_scores(query.split())
         bm25_ids = sorted(
             range(len(bm25_scores)),
@@ -133,33 +313,85 @@ class RAGEngine:
             reverse=True
         )[:top_k]
 
-        # Merge
-        candidate_ids = list(set(faiss_ids[0]) | set(bm25_ids))
-        return [self.id2chunk[i] for i in candidate_ids]
+        # Merge results (using native Python ints)
+        candidate_ids = list(set(faiss_ids_list) | set(bm25_ids))
+        
+        # Handle case where no chunks were retrieved
+        if not candidate_ids:
+            return []
+        
+        # Calculate combined scores
+        scored_chunks = []
+        for idx in candidate_ids:
+            # Ensure idx is valid
+            if idx not in self.id2chunk:
+                continue
+                
+            chunk = self.id2chunk[idx]
+            
+            # Get FAISS score
+            if idx in faiss_ids_list:
+                faiss_idx_pos = faiss_ids_list.index(idx)
+                faiss_score = faiss_scores_list[faiss_idx_pos]
+            else:
+                faiss_score = 0.0
+            
+            # Get BM25 score
+            bm25_score = bm25_scores[idx]
+            bm25_normalized = bm25_score / (max(bm25_scores) + 1e-10)
+            
+            combined_score = (faiss_score + bm25_normalized) / 2
+            
+            scored_chunks.append({
+                'chunk': chunk,
+                'score': combined_score
+            })
+        
+        # Sort by score
+        scored_chunks.sort(key=lambda x: x['score'], reverse=True)
+        
+        return [sc['chunk'] for sc in scored_chunks]
     
-    # ========== MODIFIED: ANSWER QUESTION WITH TRANSLATION ==========
-    def answer_question(self, query: str):
+    def answer_question(self, query: str, debug=False):
+        """Answer a question using RAG"""
         # Detect original language
         original_lang = self.detect_language(query)
         
-        # NEW: If query is in English, translate to Arabic for better retrieval
+        # Translate to Arabic if needed for better retrieval
         if original_lang == "en":
-            print(f"[INFO] English query detected: '{query}'")
+            if debug:
+                print(f"[DEBUG] English query detected: '{query}'")
             arabic_query = self.translate_to_arabic(query)
-            print(f"[INFO] Translated to Arabic: '{arabic_query}'")
+            if debug:
+                print(f"[DEBUG] Translated to Arabic: '{arabic_query}'")
             retrieval_query = arabic_query
         else:
             retrieval_query = query
         
-        # Retrieve using Arabic query (whether original or translated)
-        retrieved = self.retrieve_chunks(retrieval_query, top_k=1)
+        # Retrieve chunks
+        retrieved = self.retrieve_chunks(retrieval_query, top_k=10)
         
+        # Handle case where no chunks were retrieved
+        if not retrieved:
+            if original_lang == "ar":
+                return "عذراً، لم أتمكن من العثور على معلومات ذات صلة بسؤالك في الوثيقة."
+            else:
+                return "Sorry, I couldn't find relevant information for your question in the document."
+        
+        if debug:
+            print(f"\n[DEBUG] Retrieved {len(retrieved)} chunks:")
+            for i, c in enumerate(retrieved[:5], 1):
+                subsection = f" ({c.metadata.get('subsection')})" if c.metadata.get('subsection') else ""
+                print(f"  {i}. {c.metadata['header']}{subsection}")
+                print(f"     Size: {c.metadata['chunk_size']} chars")
+        
+        # Build context
         context = "\n\n".join(
             f"[{c.metadata['header']}]\n{c.content}"
             for c in retrieved
         )
         
-        # Generate answer in the ORIGINAL language
+        # Generate answer in original language
         if original_lang == "ar":
             system_msg = "أنت مساعد قانوني متخصص. أجب بدقة استناداً إلى النصوص المقدمة فقط. كن مختصراً ومباشراً."
             user_prompt = f"""النصوص القانونية:
@@ -185,8 +417,72 @@ Answer based only on the texts above. If you cannot find a clear answer, say "No
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            temperature=0.1,
-            max_tokens=500
+            temperature=0.3,
+            max_tokens=1500
         )
         
         return response.choices[0].message.content
+    
+    def get_statistics(self):
+        """Get statistics about the chunks"""
+        total_chunks = len(self.chunks)
+        articles = sum(1 for c in self.chunks if c.metadata['type'] == 'article')
+        tables = sum(1 for c in self.chunks if c.metadata['type'] == 'table')
+        sub_chunks = sum(1 for c in self.chunks if c.metadata.get('is_subchunk'))
+        
+        sizes = [c.metadata['chunk_size'] for c in self.chunks]
+        
+        # Get unique article numbers
+        article_numbers = sorted(set(
+            int(c.metadata['number']) 
+            for c in self.chunks 
+            if c.metadata['type'] == 'article' and c.metadata['number']
+        ))
+        
+        return {
+            'total_chunks': total_chunks,
+            'articles': articles,
+            'tables': tables,
+            'sub_chunks': sub_chunks,
+            'unique_article_numbers': len(article_numbers),
+            'article_range': f"{min(article_numbers)} to {max(article_numbers)}" if article_numbers else "N/A",
+            'avg_size': sum(sizes) / len(sizes) if sizes else 0,
+            'max_size': max(sizes) if sizes else 0,
+            'min_size': min(sizes) if sizes else 0
+        }
+
+
+# ========== EXAMPLE USAGE ==========
+
+if __name__ == "__main__":
+    import os
+    
+    # Initialize RAG engine
+    engine = RAGEngine(
+        document_path="arabic_text_and_tables.txt",
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+          # Adjust as needed
+    )
+    
+    # Print statistics
+    stats = engine.get_statistics()
+    print("\n" + "="*80)
+    print("STATISTICS")
+    print("="*80)
+    for key, value in stats.items():
+        print(f"{key}: {value}")
+    
+    # Test queries
+    print("\n" + "="*80)
+    print("EXAMPLE QUERIES")
+    print("="*80)
+    
+    # Arabic query
+    print("\n1. Arabic query:")
+    answer = engine.answer_question("ما هي الإجازة الدورية للموظف؟", debug=True)
+    print(f"\nAnswer: {answer}")
+    
+    # English query
+    print("\n\n2. English query:")
+    answer = engine.answer_question("What is the annual leave entitlement?", debug=True)
+    print(f"\nAnswer: {answer}")
