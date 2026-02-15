@@ -248,7 +248,8 @@ class RAGEngine:
         self.embedder = SentenceTransformer("intfloat/multilingual-e5-large")
         
         texts = [c.content for c in self.chunks]
-        embeddings = self.embedder.encode(texts, normalize_embeddings=True)
+        passage_texts = [f"passage: {text}" for text in texts]
+        embeddings = self.embedder.encode(passage_texts, normalize_embeddings=True)
         
         dim = embeddings.shape[1]
         self.faiss_index = faiss.IndexFlatIP(dim)
@@ -291,66 +292,71 @@ class RAGEngine:
                 }
             ],
             temperature=0,
-            max_tokens=200
+            max_tokens=1000
         )
         return response.choices[0].message.content.strip()
     
-    def retrieve_chunks(self, query: str, top_k=5):
-        """Retrieve relevant chunks using hybrid search (FAISS + BM25)"""
+    def retrieve_chunks(self, query: str, top_k=5, k=60):
+        """
+        Retrieve relevant chunks using Reciprocal Rank Fusion (RRF)
+        
+        RRF combines rankings from FAISS and BM25 using the formula:
+        RRF_score(d) = sum over all rankings( 1 / (k + rank(d)) )
+        
+        Args:
+            query: Search query
+            top_k: Number of chunks to return
+            k: RRF constant (default 60, typical range 30-100)
+        """
         # FAISS semantic search
-        q_emb = self.embedder.encode([query], normalize_embeddings=True)
-        faiss_scores, faiss_ids = self.faiss_index.search(q_emb, top_k)
+        query_text = f"query: {query}"
+        q_emb = self.embedder.encode([query_text], normalize_embeddings=True)
+        
+        # Get more candidates for better fusion
+        search_k = min(top_k * 2, len(self.chunks))
+        faiss_scores, faiss_ids = self.faiss_index.search(q_emb, search_k)
 
         # Convert FAISS results to Python native types and filter out invalid indices (-1)
         faiss_ids_list = [int(idx) for idx in faiss_ids[0] if idx >= 0]
-        faiss_scores_list = [float(score) for score, idx in zip(faiss_scores[0], faiss_ids[0]) if idx >= 0]
 
         # BM25 keyword search
         bm25_scores = self.bm25.get_scores(query.split())
-        bm25_ids = sorted(
+        bm25_ranking = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
             reverse=True
-        )[:top_k]
+        )[:search_k]
 
-        # Merge results (using native Python ints)
-        candidate_ids = list(set(faiss_ids_list) | set(bm25_ids))
+        # RRF: Reciprocal Rank Fusion
+        rrf_scores = {}
+        
+        # Add FAISS rankings to RRF
+        for rank, idx in enumerate(faiss_ids_list):
+            if idx in self.id2chunk:
+                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank + 1)
+        
+        # Add BM25 rankings to RRF
+        for rank, idx in enumerate(bm25_ranking):
+            if idx in self.id2chunk:
+                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank + 1)
         
         # Handle case where no chunks were retrieved
-        if not candidate_ids:
+        if not rrf_scores:
             return []
         
-        # Calculate combined scores
-        scored_chunks = []
-        for idx in candidate_ids:
-            # Ensure idx is valid
-            if idx not in self.id2chunk:
-                continue
-                
-            chunk = self.id2chunk[idx]
-            
-            # Get FAISS score
-            if idx in faiss_ids_list:
-                faiss_idx_pos = faiss_ids_list.index(idx)
-                faiss_score = faiss_scores_list[faiss_idx_pos]
-            else:
-                faiss_score = 0.0
-            
-            # Get BM25 score
-            bm25_score = bm25_scores[idx]
-            bm25_normalized = bm25_score / (max(bm25_scores) + 1e-10)
-            
-            combined_score = (faiss_score + bm25_normalized) / 2
-            
-            scored_chunks.append({
-                'chunk': chunk,
-                'score': combined_score
-            })
+        # Sort by RRF score (higher is better)
+        sorted_chunks = sorted(
+            rrf_scores.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
         
-        # Sort by score
-        scored_chunks.sort(key=lambda x: x['score'], reverse=True)
-        
-        return [sc['chunk'] for sc in scored_chunks]
+        # Return top-k chunks
+        return [
+            self.id2chunk[idx] 
+            for idx, score in sorted_chunks[:top_k]
+            if idx in self.id2chunk
+        ]
     
     def answer_question(self, query: str, debug=False):
         """Answer a question using RAG"""
