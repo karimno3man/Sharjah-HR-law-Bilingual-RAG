@@ -399,22 +399,77 @@ class RAGEngine:
         
         # Generate answer in original language
         if original_lang == "ar":
-            system_msg = "أنت مساعد قانوني متخصص. أجب بدقة استناداً إلى النصوص المقدمة فقط. كن مختصراً ومباشراً."
+            system_msg = """أنت مساعد قانوني متخصص.
+            مهمتك هي استخراج جميع المعلومات ذات الصلة من النصوص المقدمة فقط.
+            لا تفترض ولا تضف أي معلومة من خارج النص.
+
+            يجب عليك:
+            - الإجابة بنفس لغة السؤال تماماً (إذا كان السؤال بالعربية يجب أن تكون الإجابة بالعربية فقط).
+            - عدم استخدام أي لغة أخرى في الإجابة.
+
+            إذا كان السؤال يطلب عناصر متعددة (نقاط، شروط، فئات، رواتب، إلخ) فيجب عليك:
+            - استخراج جميع العناصر المذكورة كاملة بدون حذف أي نقطة.
+            - عدم تكرار أي نقطة.
+            - عرض الإجابة في نقاط واضحة إذا كانت موجودة كنقاط في النص.
+
+            إذا لم تجد إجابة صريحة وواضحة في النصوص، قل فقط: "غير مذكور في الوثيقة".
+            كن دقيقاً ومباشراً."""
+
             user_prompt = f"""النصوص القانونية:
-{context}
 
-السؤال: {query}
+            {context}
 
-أجب بناءً على النصوص أعلاه فقط. إذا لم تجد إجابة واضحة، قل "غير مذكور في الوثيقة"."""
+             السؤال:
+            {query}
+
+            تعليمات مهمة:
+            - اقرأ جميع النصوص بعناية.
+            - استخرج كل العناصر المرتبطة بالسؤال بالكامل.
+            - لا تحذف أي بند مذكور في النص.
+            - لا تكرر أي بند.
+            - لا تعتمد على الفهم العام، فقط على النص الحرفي أعلاه.
+            - في حال اختلاف صياغة السؤال عن النص (مثل اختلاف بسيط في الكلمات)، اعتبر المعنى المقصود إذا كان واضحاً من السياق.
+            - يجب أن تكون الإجابة بنفس لغة السؤال فقط.
+
+            أجب الآن."""
+
         else:
-            system_msg = "You are a legal assistant. Answer accurately based only on the provided texts. Be concise and direct."
-            user_prompt = f"""Legal texts:
-{context}
+            system_msg = """You are a professional legal assistant.
+            Your task is to extract ALL relevant information strictly from the provided texts.
+            Do NOT add information from outside the texts.
 
-Question: {query}
+            CRITICAL LANGUAGE RULE: The source texts are in Arabic, but the user's question is in English.
+            You MUST translate all relevant information from Arabic to English and answer ENTIRELY in English.
+            Do NOT include any Arabic text in your response. Every word of your answer must be in English.
 
-Answer based only on the texts above. If you cannot find a clear answer, say "Not mentioned in the document"."""
-        
+            If the question requires multiple items (bullets, conditions, categories, salaries, etc.), you MUST:
+            - Retrieve all listed items completely.
+            - Do not omit any item mentioned in the text.
+            - Do not repeat any item.
+            - Preserve bullet structure if present in the text.
+
+            If the answer is not explicitly stated, respond only with: "Not mentioned in the document".
+            Be precise and direct."""
+
+            user_prompt = f"""The following legal texts are in Arabic. Read them carefully and answer the question in English only.
+
+            Arabic legal texts:
+            {context}
+
+            Question (in English — your answer MUST also be in English):
+            {query}
+
+            Important instructions:
+            - Carefully review all provided Arabic texts.
+            - Extract every relevant item fully and translate it to English.
+            - Do not omit any listed element.
+            - Do not duplicate any element.
+            - Base your answer strictly on explicit text.
+            - If there is minor wording variation or typo in the question (e.g. spelling differences), interpret it according to the closest matching term in the provided text.
+            - YOUR ENTIRE ANSWER MUST BE IN ENGLISH. Do not use any Arabic in your response.
+
+            Provide your final answer now in English."""
+
         messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_prompt}
