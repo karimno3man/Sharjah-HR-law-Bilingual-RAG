@@ -265,6 +265,10 @@ class RAGEngine:
         # Initialize OpenAI client
         self.client = OpenAI(api_key=openai_api_key)
         
+        # Conversation memory (current session only)
+        self.conversation_history: List[Dict] = []
+        self.max_history_turns = 6  # Keep last 6 turns (3 Q&A pairs)
+        
         print("✅ RAG engine ready!")
     
     def detect_language(self, text: str) -> str:
@@ -296,6 +300,49 @@ class RAGEngine:
         )
         return response.choices[0].message.content.strip()
     
+    def rewrite_query_with_history(self, query: str) -> str:
+        """
+        If there's conversation history, rewrite the query as a fully standalone question.
+        This ensures follow-up questions like 'what about exceptions?' retrieve correctly.
+        """
+        if not self.conversation_history:
+            return query  # No history yet, use query as-is
+        
+        # Build a compact history string
+        history_text = ""
+        for turn in self.conversation_history[-self.max_history_turns:]:
+            role = "User" if turn["role"] == "user" else "Assistant"
+            history_text += f"{role}: {turn['content']}\n"
+        
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a query rewriter. Given a conversation history and a follow-up question, "
+                        "rewrite the follow-up question as a single, fully self-contained question "
+                        "that includes all necessary context from the history. "
+                        "Output ONLY the rewritten question, nothing else. "
+                        "Keep the same language as the follow-up question."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Conversation history:\n{history_text}\nFollow-up question: {query}\n\nRewritten standalone question:"
+                }
+            ],
+            temperature=0,
+            max_tokens=200
+        )
+        rewritten = response.choices[0].message.content.strip()
+        return rewritten
+
+    def clear_history(self):
+        """Clear conversation history to start a fresh session."""
+        self.conversation_history = []
+        print("🗑️ Conversation history cleared.")
+
     def retrieve_chunks(self, query: str, top_k=5, k=60):
         """
         Retrieve relevant chunks using Reciprocal Rank Fusion (RRF)
@@ -359,21 +406,27 @@ class RAGEngine:
         ]
     
     def answer_question(self, query: str, debug=False):
-        """Answer a question using RAG"""
+        """Answer a question using RAG with conversation memory."""
         # Detect original language
         original_lang = self.detect_language(query)
-        
+
+        # Step 1: Rewrite query using conversation history for better retrieval
+        standalone_query = self.rewrite_query_with_history(query)
+        if debug and standalone_query != query:
+            print(f"[DEBUG] Original query: '{query}'")
+            print(f"[DEBUG] Rewritten query: '{standalone_query}'")
+
         # Translate to Arabic if needed for better retrieval
         if original_lang == "en":
             if debug:
-                print(f"[DEBUG] English query detected: '{query}'")
-            arabic_query = self.translate_to_arabic(query)
+                print(f"[DEBUG] English query detected: '{standalone_query}'")
+            arabic_query = self.translate_to_arabic(standalone_query)
             if debug:
                 print(f"[DEBUG] Translated to Arabic: '{arabic_query}'")
             retrieval_query = arabic_query
         else:
-            retrieval_query = query
-        
+            retrieval_query = standalone_query
+
         # Retrieve chunks
         retrieved = self.retrieve_chunks(retrieval_query, top_k=10)
         
@@ -472,8 +525,13 @@ class RAGEngine:
 
         messages = [
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_prompt}
         ]
+
+        # Inject recent conversation history before the current user prompt
+        if self.conversation_history:
+            messages.extend(self.conversation_history[-self.max_history_turns:])
+
+        messages.append({"role": "user", "content": user_prompt})
         
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
@@ -482,7 +540,17 @@ class RAGEngine:
             max_tokens=1500
         )
         
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
+
+        # Save this turn to conversation history
+        self.conversation_history.append({"role": "user", "content": query})
+        self.conversation_history.append({"role": "assistant", "content": answer})
+
+        # Trim history to max window
+        if len(self.conversation_history) > self.max_history_turns:
+            self.conversation_history = self.conversation_history[-self.max_history_turns:]
+
+        return answer
     
     def get_statistics(self):
         """Get statistics about the chunks"""
