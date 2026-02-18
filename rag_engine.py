@@ -245,12 +245,12 @@ class RAGEngine:
         print(f"Total chunks: {len(self.chunks)} ({articles} articles, {tables} tables)")
         
         # Initialize embedder and FAISS
-        print("Creating embeddings...")
-        self.embedder = SentenceTransformer("intfloat/multilingual-e5-large")
+        print("Creating embeddings (using BAAI/bge-m3)...")
+        self.embedder = SentenceTransformer("BAAI/bge-m3")
         
         texts = [c.content for c in self.chunks]
-        passage_texts = [f"passage: {text}" for text in texts]
-        embeddings = self.embedder.encode(passage_texts, normalize_embeddings=True)
+        # bge-m3 does not need 'passage:' prefix
+        embeddings = self.embedder.encode(texts, normalize_embeddings=True)
         
         dim = embeddings.shape[1]
         self.faiss_index = faiss.IndexFlatIP(dim)
@@ -260,7 +260,11 @@ class RAGEngine:
         
         # Initialize BM25
         print("Initializing BM25...")
-        tokenized_corpus = [c.content.split() for c in self.chunks]
+        # BM25 Tokenizer (Better than split() - ignores punctuation like (1))
+        # This matches "المادة (1)" with "المادة 1"
+        self.bm25_tokenizer = lambda text: re.findall(r'\w+', text)
+        
+        tokenized_corpus = [self.bm25_tokenizer(c.content) for c in self.chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
         
         # Initialize OpenAI client
@@ -310,8 +314,8 @@ class RAGEngine:
             k: RRF constant (default 60, typical range 30-100)
         """
         # FAISS semantic search
-        query_text = f"query: {query}"
-        q_emb = self.embedder.encode([query_text], normalize_embeddings=True)
+        # bge-m3 does not need 'query:' prefix
+        q_emb = self.embedder.encode([query], normalize_embeddings=True)
         
         # Get more candidates for better fusion
         search_k = min(top_k * 2, len(self.chunks))
@@ -320,8 +324,8 @@ class RAGEngine:
         # Convert FAISS results to Python native types and filter out invalid indices (-1)
         faiss_ids_list = [int(idx) for idx in faiss_ids[0] if idx >= 0]
 
-        # BM25 keyword search
-        bm25_scores = self.bm25.get_scores(query.split())
+        # BM25 keyword search (Normalize query same as corpus)
+        bm25_scores = self.bm25.get_scores(self.bm25_tokenizer(query))
         bm25_ranking = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
@@ -556,7 +560,10 @@ class RAGEngine:
         ))
         
         return {
-            'total_chunks': total_chunks,
+            "total_chunks": total_chunks,
+            "embedding_model": "BAAI/bge-m3",
+            "llm_model": "gpt-4o-mini",
+            "retrieval_methods": ["FAISS", "BM25"],
             'articles': articles,
             'tables': tables,
             'sub_chunks': sub_chunks,

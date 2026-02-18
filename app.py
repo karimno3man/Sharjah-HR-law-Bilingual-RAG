@@ -96,7 +96,7 @@ def stats():
     
     return {
         "total_chunks": len(rag.chunks),
-        "embedding_model": "intfloat/multilingual-e5-large",
+        "embedding_model": "BAAI/bge-m3",
         "llm_model": "gpt-4o-mini",
         "retrieval_methods": ["FAISS", "BM25"]
     }
