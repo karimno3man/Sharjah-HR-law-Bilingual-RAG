@@ -6,6 +6,7 @@ from typing import List, Dict
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
+import tiktoken
 
 
 @dataclass
@@ -358,8 +359,8 @@ class RAGEngine:
             if idx in self.id2chunk
         ]
     
-    def answer_question(self, query: str, debug=False):
-        """Answer a question using RAG"""
+    def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False):
+        """Answer a question using RAG with sliding window history"""
         # Detect original language
         original_lang = self.detect_language(query)
         
@@ -470,19 +471,73 @@ class RAGEngine:
 
             Provide your final answer now in English."""
 
-        messages = [
+        # Prepare base messages (System + User Prompt with Context)
+        base_messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_prompt}
         ]
         
+        # --- TOKEN-BOUNDED SLIDING WINDOW (Last 5 Questions / 10 Messages) ---
+        
+        # 1. Calculate Base Tokens (System + RAG Context + Query)
+        base_tokens = self.count_tokens(base_messages)
+        
+        # 2. Define Limits
+        MAX_TOTAL_TOKENS = 8000  # Total context window
+        remaining_tokens = MAX_TOTAL_TOKENS - base_tokens
+        
+        history_messages = []
+        
+        # 3. Process History if available
+        if history and remaining_tokens > 0:
+            # A. Filter to ONLY the last 10 messages (5 user + 5 assistant)
+            recent_history = history[-10:] if len(history) > 10 else history
+            
+            # B. Fill remaining budget backwards
+            current_history_tokens = 0
+            # Iterate backwards to keep most recent
+            for msg in reversed(recent_history):
+                msg_tokens = self.count_tokens([msg])
+                
+                if current_history_tokens + msg_tokens <= remaining_tokens:
+                    history_messages.insert(0, msg)
+                    current_history_tokens += msg_tokens
+                else:
+                    # Budget full, stop adding older messages
+                    break
+            
+            if debug and history_messages:
+                print(f"[DEBUG] History used: {len(history_messages)} messages ({current_history_tokens} tokens)")
+
+        # 4. Construct Final Message List
+        # Format: [System] + [History] + [User Prompt with Context]
+        final_messages = [base_messages[0]] + history_messages + [base_messages[1]]
+        
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages,
+            messages=final_messages,
             temperature=0.3,
             max_tokens=1500
         )
         
         return response.choices[0].message.content
+
+    def count_tokens(self, messages: List[Dict[str, str]], model="gpt-4o-mini") -> int:
+        """Count tokens in a list of messages using tiktoken"""
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+            
+        num_tokens = 0
+        for message in messages:
+            num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                num_tokens += len(encoding.encode(str(value)))
+                if key == "name":  # if there's a name, the role is omitted
+                    num_tokens += -1  # role is always required and always 1 token
+        num_tokens += 2  # every reply is primed with <im_start>assistant
+        return num_tokens
     
     def get_statistics(self):
         """Get statistics about the chunks"""
