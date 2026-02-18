@@ -465,8 +465,7 @@ class RAGEngine:
             - عدم تكرار أي نقطة.
             - عرض الإجابة في نقاط واضحة إذا كانت موجودة كنقاط في النص.
 
-            إذا لم تجد إجابة صريحة وواضحة في النصوص، قل فقط: "غير مذكور في الوثيقة".
-            كن دقيقاً ومباشراً."""
+           """
 
             user_prompt = f"""النصوص القانونية:
 
@@ -501,8 +500,7 @@ class RAGEngine:
             - Do not repeat any item.
             - Preserve bullet structure if present in the text.
 
-            If the answer is not explicitly stated, respond only with: "Not mentioned in the document".
-            Be precise and direct."""
+            """
 
             user_prompt = f"""The following legal texts are in Arabic. Read them carefully and answer the question in English only.
 
