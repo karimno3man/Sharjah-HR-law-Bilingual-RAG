@@ -365,21 +365,26 @@ class RAGEngine:
     
     def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False):
         """Answer a question using RAG with sliding window history"""
-        # Detect original language
+        
+        # 1. Contextualize Query (Rewrite follow-up questions)
+        search_query = query
+        if history:
+            search_query = self.contextualize_q(query, history)
+            if debug and search_query != query:
+                print(f"[DEBUG] Rewritten Query: '{search_query}'")
+
+        # Detect original language (using the rewritten query or original?)
+        # Better to detect on ORIGINAL to respect user's output language preference
         original_lang = self.detect_language(query)
         
-        # Translate to Arabic if needed for better retrieval
+        # 2. Translate search_query to Arabic if needed for better retrieval
+        retrieval_query = search_query
         if original_lang == "en":
             if debug:
-                print(f"[DEBUG] English query detected: '{query}'")
-            arabic_query = self.translate_to_arabic(query)
-            if debug:
-                print(f"[DEBUG] Translated to Arabic: '{arabic_query}'")
-            retrieval_query = arabic_query
-        else:
-            retrieval_query = query
+                print(f"[DEBUG] Translating query to Arabic: '{search_query}'")
+            retrieval_query = self.translate_to_arabic(search_query)
         
-        # Retrieve chunks
+        # Retrieve chunks (search_k logic inside retrieve_chunks handles depth)
         retrieved = self.retrieve_chunks(retrieval_query, top_k=10)
         
         # Handle case where no chunks were retrieved
@@ -417,7 +422,6 @@ class RAGEngine:
             - عدم تكرار أي نقطة.
             - عرض الإجابة في نقاط واضحة إذا كانت موجودة كنقاط في النص.
 
-            إذا لم تجد إجابة صريحة وواضحة في النصوص، قل فقط: "غير مذكور في الوثيقة".
             كن دقيقاً ومباشراً."""
 
             user_prompt = f"""النصوص القانونية:
@@ -453,7 +457,6 @@ class RAGEngine:
             - Do not repeat any item.
             - Preserve bullet structure if present in the text.
 
-            If the answer is not explicitly stated, respond only with: "Not mentioned in the document".
             Be precise and direct."""
 
             user_prompt = f"""The following legal texts are in Arabic. Read them carefully and answer the question in English only.
@@ -494,8 +497,8 @@ class RAGEngine:
         
         # 3. Process History if available
         if history and remaining_tokens > 0:
-            # A. Filter to ONLY the last 10 messages (5 user + 5 assistant)
-            recent_history = history[-10:] if len(history) > 10 else history
+            # A. Filter to ONLY the last 6 messages (3 user + 3 assistant)
+            recent_history = history[-6:] if len(history) > 6 else history
             
             # B. Fill remaining budget backwards
             current_history_tokens = 0
@@ -542,7 +545,40 @@ class RAGEngine:
                     num_tokens += -1  # role is always required and always 1 token
         num_tokens += 2  # every reply is primed with <im_start>assistant
         return num_tokens
+
+    def contextualize_q(self, query: str, history: List[Dict[str, str]]) -> str:
+        """Rewrite a follow-up question to be a standalone search query"""
+        # Take last 3 turns (6 messages) to provide good context
+        recent_history = history[-6:] 
+        
+        # If history is empty, return original
+        if not recent_history:
+            return query
+
+        system_prompt = """Given a chat history and the latest user question which might be a follow-up, rewrite the latest question to be a standalone search query.
+Do NOT answer the question. Just return the Rewritten Query.
+If the question is already unrelated to context/history, return it as is.
+Keep the same language as the user's question (Arabic or English)."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ] + recent_history + [
+            {"role": "user", "content": query}
+        ]
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=200 
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Contextualization failed: {e}")
+            return query
     
+
     def get_statistics(self):
         """Get statistics about the chunks"""
         total_chunks = len(self.chunks)
