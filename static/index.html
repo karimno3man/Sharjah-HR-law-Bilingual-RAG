@@ -355,6 +355,9 @@
         const sendBtn = document.getElementById('send');
         const welcome = document.getElementById('welcome');
 
+        // HISTORY tracking (Last 20 messages to cover 10 pairs)
+        let chatHistory = [];
+
         /* ── Auto-resize textarea ── */
         input.addEventListener('input', () => {
             input.style.height = 'auto';
@@ -397,13 +400,23 @@
                 const res = await fetch('/ask', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question: q })
+                    body: JSON.stringify({
+                        question: q,
+                        history: chatHistory
+                    })
                 });
                 const data = await res.json();
+
+                // Add USER message to history NOW (after sending request to avoid duplicate)
+                chatHistory.push({ role: "user", content: q });
+
+                // Remove typing indicator
                 typing.remove();
 
                 if (res.ok) {
                     addMsg(data.answer, 'bot');
+                    // Add BOT message to history
+                    chatHistory.push({ role: "assistant", content: data.answer });
                 } else {
                     addMsg('⚠️ ' + (data.detail || 'Something went wrong'), 'bot');
                 }

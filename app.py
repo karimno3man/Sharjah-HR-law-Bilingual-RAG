@@ -3,7 +3,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Dict, Optional
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 from rag_engine import RAGEngine
 
 app = FastAPI(
@@ -47,6 +53,7 @@ async def startup_event():
 
 class AskRequest(BaseModel):
     question: str
+    history: Optional[List[Dict[str, str]]] = []
 
 
 @app.get("/")
@@ -89,7 +96,7 @@ def stats():
     
     return {
         "total_chunks": len(rag.chunks),
-        "embedding_model": "intfloat/multilingual-e5-large",
+        "embedding_model": "BAAI/bge-m3",
         "llm_model": "gpt-4o-mini",
         "retrieval_methods": ["FAISS", "BM25"]
     }
@@ -107,7 +114,7 @@ def ask(payload: AskRequest):
     
     try:
         # Get answer from RAG
-        answer = rag.answer_question(payload.question)
+        answer = rag.answer_question(payload.question, history=payload.history, debug=True)
         
         return {
             "answer": answer

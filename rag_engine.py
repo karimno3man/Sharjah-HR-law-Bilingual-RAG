@@ -6,6 +6,7 @@ from typing import List, Dict
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
+import tiktoken
 
 
 @dataclass
@@ -244,12 +245,12 @@ class RAGEngine:
         print(f"Total chunks: {len(self.chunks)} ({articles} articles, {tables} tables)")
         
         # Initialize embedder and FAISS
-        print("Creating embeddings...")
-        self.embedder = SentenceTransformer("intfloat/multilingual-e5-large")
+        print("Creating embeddings (using BAAI/bge-m3)...")
+        self.embedder = SentenceTransformer("BAAI/bge-m3")
         
         texts = [c.content for c in self.chunks]
-        passage_texts = [f"passage: {text}" for text in texts]
-        embeddings = self.embedder.encode(passage_texts, normalize_embeddings=True)
+        # bge-m3 does not need 'passage:' prefix
+        embeddings = self.embedder.encode(texts, normalize_embeddings=True)
         
         dim = embeddings.shape[1]
         self.faiss_index = faiss.IndexFlatIP(dim)
@@ -259,7 +260,11 @@ class RAGEngine:
         
         # Initialize BM25
         print("Initializing BM25...")
-        tokenized_corpus = [c.content.split() for c in self.chunks]
+        # BM25 Tokenizer (Better than split() - ignores punctuation like (1))
+        # This matches "المادة (1)" with "المادة 1"
+        self.bm25_tokenizer = lambda text: re.findall(r'\w+', text)
+        
+        tokenized_corpus = [self.bm25_tokenizer(c.content) for c in self.chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
         
         # Initialize OpenAI client
@@ -309,8 +314,8 @@ class RAGEngine:
             k: RRF constant (default 60, typical range 30-100)
         """
         # FAISS semantic search
-        query_text = f"query: {query}"
-        q_emb = self.embedder.encode([query_text], normalize_embeddings=True)
+        # bge-m3 does not need 'query:' prefix
+        q_emb = self.embedder.encode([query], normalize_embeddings=True)
         
         # Get more candidates for better fusion
         search_k = min(top_k * 2, len(self.chunks))
@@ -319,8 +324,8 @@ class RAGEngine:
         # Convert FAISS results to Python native types and filter out invalid indices (-1)
         faiss_ids_list = [int(idx) for idx in faiss_ids[0] if idx >= 0]
 
-        # BM25 keyword search
-        bm25_scores = self.bm25.get_scores(query.split())
+        # BM25 keyword search (Normalize query same as corpus)
+        bm25_scores = self.bm25.get_scores(self.bm25_tokenizer(query))
         bm25_ranking = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
@@ -358,23 +363,28 @@ class RAGEngine:
             if idx in self.id2chunk
         ]
     
-    def answer_question(self, query: str, debug=False):
-        """Answer a question using RAG"""
-        # Detect original language
+    def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False):
+        """Answer a question using RAG with sliding window history"""
+        
+        # 1. Contextualize Query (Rewrite follow-up questions)
+        search_query = query
+        if history:
+            search_query = self.contextualize_q(query, history)
+            if debug and search_query != query:
+                print(f"[DEBUG] Rewritten Query: '{search_query}'")
+
+        # Detect original language (using the rewritten query or original?)
+        # Better to detect on ORIGINAL to respect user's output language preference
         original_lang = self.detect_language(query)
         
-        # Translate to Arabic if needed for better retrieval
+        # 2. Translate search_query to Arabic if needed for better retrieval
+        retrieval_query = search_query
         if original_lang == "en":
             if debug:
-                print(f"[DEBUG] English query detected: '{query}'")
-            arabic_query = self.translate_to_arabic(query)
-            if debug:
-                print(f"[DEBUG] Translated to Arabic: '{arabic_query}'")
-            retrieval_query = arabic_query
-        else:
-            retrieval_query = query
+                print(f"[DEBUG] Translating query to Arabic: '{search_query}'")
+            retrieval_query = self.translate_to_arabic(search_query)
         
-        # Retrieve chunks
+        # Retrieve chunks (search_k logic inside retrieve_chunks handles depth)
         retrieved = self.retrieve_chunks(retrieval_query, top_k=10)
         
         # Handle case where no chunks were retrieved
@@ -399,36 +409,176 @@ class RAGEngine:
         
         # Generate answer in original language
         if original_lang == "ar":
-            system_msg = "أنت مساعد قانوني متخصص. أجب بدقة استناداً إلى النصوص المقدمة فقط. كن مختصراً ومباشراً."
+            system_msg = """أنت مساعد قانوني متخصص.
+            مهمتك هي استخراج جميع المعلومات ذات الصلة من النصوص المقدمة فقط.
+            لا تفترض ولا تضف أي معلومة من خارج النص.
+
+            يجب عليك:
+            - الإجابة بنفس لغة السؤال تماماً (إذا كان السؤال بالعربية يجب أن تكون الإجابة بالعربية فقط).
+            - عدم استخدام أي لغة أخرى في الإجابة.
+
+            إذا كان السؤال يطلب عناصر متعددة (نقاط، شروط، فئات، رواتب، إلخ) فيجب عليك:
+            - استخراج جميع العناصر المذكورة كاملة بدون حذف أي نقطة.
+            - عدم تكرار أي نقطة.
+            - عرض الإجابة في نقاط واضحة إذا كانت موجودة كنقاط في النص.
+
+            كن دقيقاً ومباشراً."""
+
             user_prompt = f"""النصوص القانونية:
-{context}
 
-السؤال: {query}
+            {context}
 
-أجب بناءً على النصوص أعلاه فقط. إذا لم تجد إجابة واضحة، قل "غير مذكور في الوثيقة"."""
+             السؤال:
+            {query}
+
+            تعليمات مهمة:
+            - اقرأ جميع النصوص بعناية.
+            - استخرج كل العناصر المرتبطة بالسؤال بالكامل.
+            - لا تحذف أي بند مذكور في النص.
+            - لا تكرر أي بند.
+            - لا تعتمد على الفهم العام، فقط على النص الحرفي أعلاه.
+            - في حال اختلاف صياغة السؤال عن النص (مثل اختلاف بسيط في الكلمات)، اعتبر المعنى المقصود إذا كان واضحاً من السياق.
+            - يجب أن تكون الإجابة بنفس لغة السؤال فقط.
+
+            أجب الآن."""
+
         else:
-            system_msg = "You are a legal assistant. Answer accurately based only on the provided texts. Be concise and direct."
-            user_prompt = f"""Legal texts:
-{context}
+            system_msg = """You are a professional legal assistant.
+            Your task is to extract ALL relevant information strictly from the provided texts.
+            Do NOT add information from outside the texts.
 
-Question: {query}
+            CRITICAL LANGUAGE RULE: The source texts are in Arabic, but the user's question is in English.
+            You MUST translate all relevant information from Arabic to English and answer ENTIRELY in English.
+            Do NOT include any Arabic text in your response. Every word of your answer must be in English.
 
-Answer based only on the texts above. If you cannot find a clear answer, say "Not mentioned in the document"."""
-        
-        messages = [
+            If the question requires multiple items (bullets, conditions, categories, salaries, etc.), you MUST:
+            - Retrieve all listed items completely.
+            - Do not omit any item mentioned in the text.
+            - Do not repeat any item.
+            - Preserve bullet structure if present in the text.
+
+            Be precise and direct."""
+
+            user_prompt = f"""The following legal texts are in Arabic. Read them carefully and answer the question in English only.
+
+            Arabic legal texts:
+            {context}
+
+            Question (in English — your answer MUST also be in English):
+            {query}
+
+            Important instructions:
+            - Carefully review all provided Arabic texts.
+            - Extract every relevant item fully and translate it to English.
+            - Do not omit any listed element.
+            - Do not duplicate any element.
+            - Base your answer strictly on explicit text.
+            - If there is minor wording variation or typo in the question (e.g. spelling differences), interpret it according to the closest matching term in the provided text.
+            - YOUR ENTIRE ANSWER MUST BE IN ENGLISH. Do not use any Arabic in your response.
+
+            Provide your final answer now in English."""
+
+        # Prepare base messages (System + User Prompt with Context)
+        base_messages = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_prompt}
         ]
         
+        # --- TOKEN-BOUNDED SLIDING WINDOW (Last 5 Questions / 10 Messages) ---
+        
+        # 1. Calculate Base Tokens (System + RAG Context + Query)
+        base_tokens = self.count_tokens(base_messages)
+        
+        # 2. Define Limits
+        MAX_TOTAL_TOKENS = 8000  # Total context window
+        remaining_tokens = MAX_TOTAL_TOKENS - base_tokens
+        
+        history_messages = []
+        
+        # 3. Process History if available
+        if history and remaining_tokens > 0:
+            # A. Filter to ONLY the last 6 messages (3 user + 3 assistant)
+            recent_history = history[-6:] if len(history) > 6 else history
+            
+            # B. Fill remaining budget backwards
+            current_history_tokens = 0
+            # Iterate backwards to keep most recent
+            for msg in reversed(recent_history):
+                msg_tokens = self.count_tokens([msg])
+                
+                if current_history_tokens + msg_tokens <= remaining_tokens:
+                    history_messages.insert(0, msg)
+                    current_history_tokens += msg_tokens
+                else:
+                    # Budget full, stop adding older messages
+                    break
+            
+            if debug and history_messages:
+                print(f"[DEBUG] History used: {len(history_messages)} messages ({current_history_tokens} tokens)")
+
+        # 4. Construct Final Message List
+        # Format: [System] + [History] + [User Prompt with Context]
+        final_messages = [base_messages[0]] + history_messages + [base_messages[1]]
+        
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages,
+            messages=final_messages,
             temperature=0.3,
             max_tokens=1500
         )
         
         return response.choices[0].message.content
+
+    def count_tokens(self, messages: List[Dict[str, str]], model="gpt-4o-mini") -> int:
+        """Count tokens in a list of messages using tiktoken"""
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+            
+        num_tokens = 0
+        for message in messages:
+            num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                num_tokens += len(encoding.encode(str(value)))
+                if key == "name":  # if there's a name, the role is omitted
+                    num_tokens += -1  # role is always required and always 1 token
+        num_tokens += 2  # every reply is primed with <im_start>assistant
+        return num_tokens
+
+    def contextualize_q(self, query: str, history: List[Dict[str, str]]) -> str:
+        """Rewrite a follow-up question to be a standalone search query"""
+        # Take last 3 turns (6 messages) to provide good context
+        recent_history = history[-6:] 
+        
+        # If history is empty, return original
+        if not recent_history:
+            return query
+
+        system_prompt = """Given a chat history and the latest user question which might be a follow-up, rewrite the latest question to be a standalone search query.
+Do NOT answer the question. Just return the Rewritten Query.
+If the question is already unrelated to context/history, return it as is.
+Keep the same language as the user's question (Arabic or English)."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ] + recent_history + [
+            {"role": "user", "content": query}
+        ]
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=200 
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Contextualization failed: {e}")
+            return query
     
+
     def get_statistics(self):
         """Get statistics about the chunks"""
         total_chunks = len(self.chunks)
@@ -446,7 +596,10 @@ Answer based only on the texts above. If you cannot find a clear answer, say "No
         ))
         
         return {
-            'total_chunks': total_chunks,
+            "total_chunks": total_chunks,
+            "embedding_model": "BAAI/bge-m3",
+            "llm_model": "gpt-4o-mini",
+            "retrieval_methods": ["FAISS", "BM25"],
             'articles': articles,
             'tables': tables,
             'sub_chunks': sub_chunks,
