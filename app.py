@@ -3,7 +3,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import os
+import uuid
 from rag_engine import RAGEngine
 
 app = FastAPI(
@@ -24,6 +26,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global RAG instance
 rag = None
+
+# In-memory chat history per session
+chat_histories: dict[str, list] = {}
 
 @app.on_event("startup")
 async def startup_event():
@@ -47,6 +52,7 @@ async def startup_event():
 
 class AskRequest(BaseModel):
     question: str
+    session_id: Optional[str] = None
 
 
 @app.get("/")
@@ -106,11 +112,19 @@ def ask(payload: AskRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     
     try:
-        # Get answer from RAG
-        answer = rag.answer_question(payload.question)
-        
+        # Resolve or create session
+        session_id = payload.session_id or str(uuid.uuid4())
+        if session_id not in chat_histories:
+            chat_histories[session_id] = []
+
+        history = chat_histories[session_id]
+
+        # Get answer from RAG (history is updated in-place by answer_question)
+        answer = rag.answer_question(payload.question, history=history)
+
         return {
-            "answer": answer
+            "answer": answer,
+            "session_id": session_id
         }
     
     except Exception as e:
