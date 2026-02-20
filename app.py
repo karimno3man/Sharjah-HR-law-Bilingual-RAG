@@ -1,16 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Optional
 import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
+import io
+from openai import OpenAI
 from rag_engine import RAGEngine
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "verse"
+    model: str = "tts-1"
+
 
 app = FastAPI(
     title='Sharjah Rag',
@@ -53,7 +55,6 @@ async def startup_event():
 
 class AskRequest(BaseModel):
     question: str
-    history: Optional[List[Dict[str, str]]] = []
 
 
 @app.get("/")
@@ -96,7 +97,7 @@ def stats():
     
     return {
         "total_chunks": len(rag.chunks),
-        "embedding_model": "BAAI/bge-m3",
+        "embedding_model": "intfloat/multilingual-e5-large",
         "llm_model": "gpt-4o-mini",
         "retrieval_methods": ["FAISS", "BM25"]
     }
@@ -114,7 +115,7 @@ def ask(payload: AskRequest):
     
     try:
         # Get answer from RAG
-        answer = rag.answer_question(payload.question, history=payload.history, debug=True)
+        answer = rag.answer_question(payload.question)
         
         return {
             "answer": answer
@@ -122,3 +123,16 @@ def ask(payload: AskRequest):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+
+
+# New endpoint sketch
+@app.post("/tts")
+async def text_to_speech(payload: TTSRequest):
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice="alloy",
+        input=payload.text
+    )
+    audio_bytes = response.content
+    return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/mpeg")
