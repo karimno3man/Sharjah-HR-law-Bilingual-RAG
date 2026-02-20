@@ -303,6 +303,46 @@
             transform: none;
         }
 
+        /* ── TTS Button ── */
+        .tts-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 10px;
+            padding: 6px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(108, 99, 255, 0.08);
+            color: var(--text-muted);
+            font-size: .78rem;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all .25s ease;
+        }
+
+        .tts-btn:hover {
+            background: rgba(108, 99, 255, 0.18);
+            color: var(--text);
+            border-color: var(--accent);
+        }
+
+        .tts-btn.playing {
+            color: var(--accent);
+            border-color: var(--accent);
+            box-shadow: 0 0 12px var(--accent-glow);
+            animation: tts-pulse 1.2s ease-in-out infinite;
+        }
+
+        .tts-btn:disabled {
+            opacity: .5;
+            cursor: not-allowed;
+        }
+
+        @keyframes tts-pulse {
+            0%, 100% { box-shadow: 0 0 8px var(--accent-glow); }
+            50% { box-shadow: 0 0 20px var(--accent-glow); }
+        }
+
         /* ── Responsive ── */
         @media (max-width: 600px) {
             .msg {
@@ -416,12 +456,94 @@
             input.focus();
         }
 
+        /* ── Current TTS audio state ── */
+        let currentAudio = null;
+        let currentTTSBtn = null;
+
         function addMsg(text, role) {
             const div = document.createElement('div');
             div.className = 'msg ' + role;
             div.textContent = text;
+
+            if (role === 'bot' && !text.startsWith('⚠️')) {
+                const btn = document.createElement('button');
+                btn.className = 'tts-btn';
+                btn.innerHTML = '🔊 Listen';
+                btn.onclick = () => playTTS(btn, text);
+                div.appendChild(btn);
+            }
+
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
+        }
+
+        async function playTTS(btn, text) {
+            // If same button is clicked while playing, stop it
+            if (currentAudio && currentTTSBtn === btn) {
+                currentAudio.pause();
+                currentAudio = null;
+                btn.classList.remove('playing');
+                btn.innerHTML = '🔊 Listen';
+                currentTTSBtn = null;
+                return;
+            }
+
+            // Stop any other playing audio
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+                if (currentTTSBtn) {
+                    currentTTSBtn.classList.remove('playing');
+                    currentTTSBtn.innerHTML = '🔊 Listen';
+                }
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Loading...';
+
+            try {
+                const res = await fetch('/tts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+
+                if (!res.ok) throw new Error('TTS request failed');
+
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+
+                currentAudio = audio;
+                currentTTSBtn = btn;
+
+                btn.disabled = false;
+                btn.classList.add('playing');
+                btn.innerHTML = '⏹ Stop';
+
+                audio.play();
+
+                audio.onended = () => {
+                    btn.classList.remove('playing');
+                    btn.innerHTML = '🔊 Listen';
+                    URL.revokeObjectURL(url);
+                    currentAudio = null;
+                    currentTTSBtn = null;
+                };
+
+                audio.onerror = () => {
+                    btn.classList.remove('playing');
+                    btn.innerHTML = '🔊 Listen';
+                    URL.revokeObjectURL(url);
+                    currentAudio = null;
+                    currentTTSBtn = null;
+                };
+
+            } catch (err) {
+                console.error('TTS error:', err);
+                btn.disabled = false;
+                btn.innerHTML = '🔊 Listen';
+            }
         }
     </script>
 </body>
