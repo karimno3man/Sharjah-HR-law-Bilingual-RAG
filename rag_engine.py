@@ -1,14 +1,4 @@
 import re
-import os
-
-# Make PyTorch / tokenizers safer on macOS (MPS issues, excessive parallelism)
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
-
-# Safer, lighter multilingual embedding model than BAAI/bge-m3 on macOS
-EMBEDDING_MODEL_NAME = "sentence-transformers/distiluse-base-multilingual-cased-v2"
-
 import numpy as np
 import faiss
 from dataclasses import dataclass
@@ -16,7 +6,6 @@ from typing import List, Dict
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
-import tiktoken
 
 
 @dataclass
@@ -253,26 +242,32 @@ class RAGEngine:
         articles = sum(1 for c in self.chunks if c.metadata['type'] == 'article')
         tables = sum(1 for c in self.chunks if c.metadata['type'] == 'table')
         print(f"Total chunks: {len(self.chunks)} ({articles} articles, {tables} tables)")
-
-        # NOTE: To avoid Torch/attention-related crashes on macOS, we disable
-        # semantic embeddings for now and rely purely on BM25 keyword search.
-        print("Semantic embeddings disabled on this platform; using BM25-only retrieval.")
-
-        self.embedder = None
-        self.faiss_index = None
+        
+        # Initialize embedder and FAISS
+        print("Creating embeddings...")
+        self.embedder = SentenceTransformer("intfloat/multilingual-e5-large")
+        
+        texts = [c.content for c in self.chunks]
+        passage_texts = [f"passage: {text}" for text in texts]
+        embeddings = self.embedder.encode(passage_texts, normalize_embeddings=True)
+        
+        dim = embeddings.shape[1]
+        self.faiss_index = faiss.IndexFlatIP(dim)
+        self.faiss_index.add(np.array(embeddings))
+        
         self.id2chunk = {i: c for i, c in enumerate(self.chunks)}
-
+        
         # Initialize BM25
         print("Initializing BM25...")
-        # BM25 Tokenizer (Better than split() - ignores punctuation like (1))
-        # This matches "المادة (1)" with "المادة 1"
-        self.bm25_tokenizer = lambda text: re.findall(r'\w+', text)
-        
-        tokenized_corpus = [self.bm25_tokenizer(c.content) for c in self.chunks]
+        tokenized_corpus = [c.content.split() for c in self.chunks]
         self.bm25 = BM25Okapi(tokenized_corpus)
         
         # Initialize OpenAI client
         self.client = OpenAI(api_key=openai_api_key)
+        
+        # Conversation memory (current session only)
+        self.conversation_history: List[Dict] = []
+        self.max_history_turns = 6  # Keep last 6 turns (3 Q&A pairs)
         
         print("✅ RAG engine ready!")
     
@@ -305,54 +300,134 @@ class RAGEngine:
         )
         return response.choices[0].message.content.strip()
     
-    def retrieve_chunks(self, query: str, top_k=5, k: int = 60):
+    def rewrite_query_with_history(self, query: str) -> str:
         """
-        Retrieve relevant chunks.
+        If there's conversation history, rewrite the query as a fully standalone question.
+        This ensures follow-up questions like 'what about exceptions?' retrieve correctly.
+        """
+        if not self.conversation_history:
+            return query  # No history yet, use query as-is
+        
+        # Build a compact history string
+        history_text = ""
+        for turn in self.conversation_history[-self.max_history_turns:]:
+            role = "User" if turn["role"] == "user" else "Assistant"
+            history_text += f"{role}: {turn['content']}\n"
+        
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a query rewriter. Given a conversation history and a follow-up question, "
+                        "rewrite the follow-up question as a single, fully self-contained question "
+                        "that includes all necessary context from the history. "
+                        "Output ONLY the rewritten question, nothing else. "
+                        "Keep the same language as the follow-up question."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Conversation history:\n{history_text}\nFollow-up question: {query}\n\nRewritten standalone question:"
+                }
+            ],
+            temperature=0,
+            max_tokens=200
+        )
+        rewritten = response.choices[0].message.content.strip()
+        return rewritten
 
-        On this macOS environment we disable Torch-based semantic embeddings
-        (which were causing crashes) and use pure BM25 keyword search.
+    def clear_history(self):
+        """Clear conversation history to start a fresh session."""
+        self.conversation_history = []
+        print("🗑️ Conversation history cleared.")
 
+    def retrieve_chunks(self, query: str, top_k=5, k=60):
+        """
+        Retrieve relevant chunks using Reciprocal Rank Fusion (RRF)
+        
+        RRF combines rankings from FAISS and BM25 using the formula:
+        RRF_score(d) = sum over all rankings( 1 / (k + rank(d)) )
+        
         Args:
             query: Search query
             top_k: Number of chunks to return
-            k: Unused (kept for backward compatibility)
+            k: RRF constant (default 60, typical range 30-100)
         """
-        # BM25 keyword search (Normalize query same as corpus)
-        bm25_scores = self.bm25.get_scores(self.bm25_tokenizer(query))
+        # FAISS semantic search
+        query_text = f"query: {query}"
+        q_emb = self.embedder.encode([query_text], normalize_embeddings=True)
+        
+        # Get more candidates for better fusion
+        search_k = min(top_k * 2, len(self.chunks))
+        faiss_scores, faiss_ids = self.faiss_index.search(q_emb, search_k)
 
-        if not bm25_scores.any():
-            return []
+        # Convert FAISS results to Python native types and filter out invalid indices (-1)
+        faiss_ids_list = [int(idx) for idx in faiss_ids[0] if idx >= 0]
 
+        # BM25 keyword search
+        bm25_scores = self.bm25.get_scores(query.split())
         bm25_ranking = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
             reverse=True
-        )[:top_k]
+        )[:search_k]
 
-        return [self.id2chunk[idx] for idx in bm25_ranking if idx in self.id2chunk]
+        # RRF: Reciprocal Rank Fusion
+        rrf_scores = {}
+        
+        # Add FAISS rankings to RRF
+        for rank, idx in enumerate(faiss_ids_list):
+            if idx in self.id2chunk:
+                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank + 1)
+        
+        # Add BM25 rankings to RRF
+        for rank, idx in enumerate(bm25_ranking):
+            if idx in self.id2chunk:
+                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank + 1)
+        
+        # Handle case where no chunks were retrieved
+        if not rrf_scores:
+            return []
+        
+        # Sort by RRF score (higher is better)
+        sorted_chunks = sorted(
+            rrf_scores.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        # Return top-k chunks
+        return [
+            self.id2chunk[idx] 
+            for idx, score in sorted_chunks[:top_k]
+            if idx in self.id2chunk
+        ]
     
-    def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False):
-        """Answer a question using RAG with sliding window history"""
-        
-        # 1. Contextualize Query (Rewrite follow-up questions)
-        search_query = query
-        if history:
-            search_query = self.contextualize_q(query, history)
-            if debug and search_query != query:
-                print(f"[DEBUG] Rewritten Query: '{search_query}'")
-
-        # Detect original language (using the rewritten query or original?)
-        # Better to detect on ORIGINAL to respect user's output language preference
+    def answer_question(self, query: str, debug=False):
+        """Answer a question using RAG with conversation memory."""
+        # Detect original language
         original_lang = self.detect_language(query)
-        
-        # 2. Translate search_query to Arabic if needed for better retrieval
-        retrieval_query = search_query
+
+        # Step 1: Rewrite query using conversation history for better retrieval
+        standalone_query = self.rewrite_query_with_history(query)
+        if debug and standalone_query != query:
+            print(f"[DEBUG] Original query: '{query}'")
+            print(f"[DEBUG] Rewritten query: '{standalone_query}'")
+
+        # Translate to Arabic if needed for better retrieval
         if original_lang == "en":
             if debug:
-                print(f"[DEBUG] Translating query to Arabic: '{search_query}'")
-            retrieval_query = self.translate_to_arabic(search_query)
-        
-        # Retrieve chunks (search_k logic inside retrieve_chunks handles depth)
+                print(f"[DEBUG] English query detected: '{standalone_query}'")
+            arabic_query = self.translate_to_arabic(standalone_query)
+            if debug:
+                print(f"[DEBUG] Translated to Arabic: '{arabic_query}'")
+            retrieval_query = arabic_query
+        else:
+            retrieval_query = standalone_query
+
+        # Retrieve chunks
         retrieved = self.retrieve_chunks(retrieval_query, top_k=10)
         
         # Handle case where no chunks were retrieved
@@ -390,7 +465,7 @@ class RAGEngine:
             - عدم تكرار أي نقطة.
             - عرض الإجابة في نقاط واضحة إذا كانت موجودة كنقاط في النص.
 
-            كن دقيقاً ومباشراً."""
+           """
 
             user_prompt = f"""النصوص القانونية:
 
@@ -425,7 +500,7 @@ class RAGEngine:
             - Do not repeat any item.
             - Preserve bullet structure if present in the text.
 
-            Be precise and direct."""
+            """
 
             user_prompt = f"""The following legal texts are in Arabic. Read them carefully and answer the question in English only.
 
@@ -446,107 +521,35 @@ class RAGEngine:
 
             Provide your final answer now in English."""
 
-        # Prepare base messages (System + User Prompt with Context)
-        base_messages = [
+        messages = [
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_prompt}
         ]
-        
-        # --- TOKEN-BOUNDED SLIDING WINDOW (Last 5 Questions / 10 Messages) ---
-        
-        # 1. Calculate Base Tokens (System + RAG Context + Query)
-        base_tokens = self.count_tokens(base_messages)
-        
-        # 2. Define Limits
-        MAX_TOTAL_TOKENS = 8000  # Total context window
-        remaining_tokens = MAX_TOTAL_TOKENS - base_tokens
-        
-        history_messages = []
-        
-        # 3. Process History if available
-        if history and remaining_tokens > 0:
-            # A. Filter to ONLY the last 6 messages (3 user + 3 assistant)
-            recent_history = history[-6:] if len(history) > 6 else history
-            
-            # B. Fill remaining budget backwards
-            current_history_tokens = 0
-            # Iterate backwards to keep most recent
-            for msg in reversed(recent_history):
-                msg_tokens = self.count_tokens([msg])
-                
-                if current_history_tokens + msg_tokens <= remaining_tokens:
-                    history_messages.insert(0, msg)
-                    current_history_tokens += msg_tokens
-                else:
-                    # Budget full, stop adding older messages
-                    break
-            
-            if debug and history_messages:
-                print(f"[DEBUG] History used: {len(history_messages)} messages ({current_history_tokens} tokens)")
 
-        # 4. Construct Final Message List
-        # Format: [System] + [History] + [User Prompt with Context]
-        final_messages = [base_messages[0]] + history_messages + [base_messages[1]]
+        # Inject recent conversation history before the current user prompt
+        if self.conversation_history:
+            messages.extend(self.conversation_history[-self.max_history_turns:])
+
+        messages.append({"role": "user", "content": user_prompt})
         
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=final_messages,
+            messages=messages,
             temperature=0.3,
             max_tokens=1500
         )
         
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
 
-    def count_tokens(self, messages: List[Dict[str, str]], model="gpt-4o-mini") -> int:
-        """Count tokens in a list of messages using tiktoken"""
-        try:
-            encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            encoding = tiktoken.get_encoding("cl100k_base")
-            
-        num_tokens = 0
-        for message in messages:
-            num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
-            for key, value in message.items():
-                num_tokens += len(encoding.encode(str(value)))
-                if key == "name":  # if there's a name, the role is omitted
-                    num_tokens += -1  # role is always required and always 1 token
-        num_tokens += 2  # every reply is primed with <im_start>assistant
-        return num_tokens
+        # Save this turn to conversation history
+        self.conversation_history.append({"role": "user", "content": query})
+        self.conversation_history.append({"role": "assistant", "content": answer})
 
-    def contextualize_q(self, query: str, history: List[Dict[str, str]]) -> str:
-        """Rewrite a follow-up question to be a standalone search query"""
-        # Take last 3 turns (6 messages) to provide good context
-        recent_history = history[-6:] 
-        
-        # If history is empty, return original
-        if not recent_history:
-            return query
+        # Trim history to max window
+        if len(self.conversation_history) > self.max_history_turns:
+            self.conversation_history = self.conversation_history[-self.max_history_turns:]
 
-        system_prompt = """Given a chat history and the latest user question which might be a follow-up, rewrite the latest question to be a standalone search query.
-Do NOT answer the question. Just return the Rewritten Query.
-If the question is already unrelated to context/history, return it as is.
-Keep the same language as the user's question (Arabic or English)."""
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-        ] + recent_history + [
-            {"role": "user", "content": query}
-        ]
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.3,
-                max_tokens=200 
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(f"Contextualization failed: {e}")
-            return query
+        return answer
     
-
     def get_statistics(self):
         """Get statistics about the chunks"""
         total_chunks = len(self.chunks)
@@ -564,10 +567,7 @@ Keep the same language as the user's question (Arabic or English)."""
         ))
         
         return {
-            "total_chunks": total_chunks,
-            "embedding_model": "BAAI/bge-m3",
-            "llm_model": "gpt-4o-mini",
-            "retrieval_methods": ["FAISS", "BM25"],
+            'total_chunks': total_chunks,
             'articles': articles,
             'tables': tables,
             'sub_chunks': sub_chunks,
