@@ -155,7 +155,41 @@
             border-bottom-left-radius: 6px;
         }
 
-        /* Typing indicator */
+        /* ── TTS button ── */
+        .tts-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 12px;
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            border-radius: 8px;
+            padding: 5px 12px;
+            font-size: .78rem;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all .2s;
+        }
+
+        .tts-btn:hover {
+            border-color: var(--accent);
+            color: var(--text);
+            box-shadow: 0 0 8px var(--accent-glow);
+        }
+
+        .tts-btn.playing {
+            border-color: #34d399;
+            color: #34d399;
+            box-shadow: 0 0 8px rgba(52, 211, 153, .25);
+        }
+
+        .tts-btn:disabled {
+            opacity: .5;
+            cursor: not-allowed;
+        }
+
+        /* ── Typing indicator ── */
         .typing {
             display: flex;
             gap: 5px;
@@ -355,8 +389,8 @@
         const sendBtn = document.getElementById('send');
         const welcome = document.getElementById('welcome');
 
-        // HISTORY tracking (Last 20 messages to cover 10 pairs)
         let chatHistory = [];
+        let currentAudio = null;
 
         /* ── Auto-resize textarea ── */
         input.addEventListener('input', () => {
@@ -375,21 +409,103 @@
             ask();
         }
 
+        /* ── Add message bubble ── */
+        function addMsg(text, role) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + role;
+
+            const textNode = document.createElement('span');
+            textNode.textContent = text;
+            div.appendChild(textNode);
+
+            if (role === 'bot') {
+                const ttsBtn = document.createElement('button');
+                ttsBtn.className = 'tts-btn';
+                ttsBtn.innerHTML = '🔊 استمع';
+                ttsBtn.title = 'Listen / استمع';
+                ttsBtn.onclick = () => playTTS(text, ttsBtn);
+                div.appendChild(document.createElement('br'));
+                div.appendChild(ttsBtn);
+            }
+
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        /* ── TTS playback ── */
+        async function playTTS(text, btn) {
+            // If this button is already playing, stop it
+            if (btn.classList.contains('playing') && currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+                btn.classList.remove('playing');
+                btn.innerHTML = '🔊 استمع';
+                btn.disabled = false;
+                return;
+            }
+
+            // Stop any other playing audio
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+
+            // Reset all TTS buttons
+            document.querySelectorAll('.tts-btn').forEach(b => {
+                b.classList.remove('playing');
+                b.innerHTML = '🔊 استمع';
+                b.disabled = false;
+            });
+
+            btn.innerHTML = '⏳ جارٍ التحميل...';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/tts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+
+                if (!res.ok) throw new Error('TTS request failed');
+
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                currentAudio = new Audio(url);
+
+                btn.innerHTML = '⏹ إيقاف';
+                btn.disabled = false;
+                btn.classList.add('playing');
+
+                currentAudio.play();
+
+                currentAudio.onended = () => {
+                    btn.innerHTML = '🔊 استمع';
+                    btn.classList.remove('playing');
+                    currentAudio = null;
+                    URL.revokeObjectURL(url);
+                };
+
+            } catch (err) {
+                console.error('TTS error:', err);
+                btn.innerHTML = '🔊 استمع';
+                btn.disabled = false;
+            }
+        }
+
         /* ── Main ask function ── */
         async function ask() {
             const q = input.value.trim();
             if (!q) return;
 
-            // hide welcome
             if (welcome) welcome.style.display = 'none';
 
-            // user bubble
             addMsg(q, 'user');
             input.value = '';
             input.style.height = 'auto';
             sendBtn.disabled = true;
 
-            // typing indicator
+            // Typing indicator
             const typing = document.createElement('div');
             typing.className = 'msg bot typing';
             typing.innerHTML = '<span></span><span></span><span></span>';
@@ -407,16 +523,12 @@
                 });
                 const data = await res.json();
 
-                // Add USER message to history NOW (after sending request to avoid duplicate)
-                chatHistory.push({ role: "user", content: q });
-
-                // Remove typing indicator
+                chatHistory.push({ role: 'user', content: q });
                 typing.remove();
 
                 if (res.ok) {
                     addMsg(data.answer, 'bot');
-                    // Add BOT message to history
-                    chatHistory.push({ role: "assistant", content: data.answer });
+                    chatHistory.push({ role: 'assistant', content: data.answer });
                 } else {
                     addMsg('⚠️ ' + (data.detail || 'Something went wrong'), 'bot');
                 }
@@ -427,14 +539,6 @@
 
             sendBtn.disabled = false;
             input.focus();
-        }
-
-        function addMsg(text, role) {
-            const div = document.createElement('div');
-            div.className = 'msg ' + role;
-            div.textContent = text;
-            chat.appendChild(div);
-            chat.scrollTop = chat.scrollHeight;
         }
     </script>
 </body>
