@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Human Resource Advisor – Login</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap"
+        rel="stylesheet" />
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-hover: #222632;
+            --border: #2a2e3b;
+            --text: #e4e6eb;
+            --text-muted: #8b8fa3;
+            --accent: #6c63ff;
+            --accent-glow: rgba(108, 99, 255, .25);
+            --radius: 16px;
+        }
+
+        body {
+            font-family: 'Inter', 'Noto Sans Arabic', sans-serif;
+            background: radial-gradient(circle at top, #1f2937 0, #020617 55%, #000 100%);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .card {
+            width: 100%;
+            max-width: 420px;
+            background: rgba(15, 17, 23, .96);
+            border-radius: 24px;
+            border: 1px solid rgba(148, 163, 184, .25);
+            box-shadow:
+                0 28px 80px rgba(15, 23, 42, .85),
+                0 0 0 1px rgba(15, 23, 42, .8);
+            padding: 28px 26px 26px;
+            backdrop-filter: blur(18px);
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+
+        .logo {
+            width: 42px;
+            height: 42px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #6c63ff, #4f46e5);
+            display: grid;
+            place-items: center;
+            color: #fff;
+            font-weight: 700;
+            font-size: 22px;
+            box-shadow: 0 0 0 1px rgba(148, 163, 184, .3), 0 12px 35px rgba(88, 80, 236, .5);
+        }
+
+        .title {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .title h1 {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .title p {
+            font-size: .8rem;
+            color: var(--text-muted);
+        }
+
+        form {
+            margin-top: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        label {
+            font-size: .8rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            background: #020617;
+            color: var(--text);
+            padding: 11px 13px;
+            font-size: .9rem;
+            outline: none;
+            transition: border-color .18s, box-shadow .18s, background .18s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent-glow);
+            background: #020617;
+        }
+
+        .hint {
+            font-size: .75rem;
+            color: var(--text-muted);
+            margin-top: 6px;
+        }
+
+        .hint code {
+            font-family: Menlo, Monaco, Consolas, monospace;
+            background: rgba(15, 23, 42, .9);
+            padding: 2px 6px;
+            border-radius: 999px;
+            font-size: .72rem;
+        }
+
+        button[type="submit"] {
+            margin-top: 6px;
+            width: 100%;
+            border-radius: 999px;
+            border: none;
+            background: linear-gradient(135deg, #6c63ff, #4f46e5);
+            color: #fff;
+            padding: 11px 14px;
+            font-size: .92rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            box-shadow: 0 12px 35px rgba(88, 80, 236, .4);
+            transition: transform .12s ease, box-shadow .15s ease, filter .15s ease;
+        }
+
+        button[type="submit"]:hover {
+            transform: translateY(-1px);
+            filter: brightness(1.05);
+            box-shadow: 0 16px 45px rgba(88, 80, 236, .5);
+        }
+
+        button[type="submit"]:disabled {
+            opacity: .55;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .error {
+            margin-top: 4px;
+            min-height: 18px;
+            font-size: .78rem;
+            color: #fca5a5;
+        }
+
+        .footer {
+            margin-top: 18px;
+            font-size: .76rem;
+            color: var(--text-muted);
+            text-align: center;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <div class="header">
+            <div class="logo">HR</div>
+            <div class="title">
+                <h1>Human Resource Advisor</h1>
+                <p>Sign in to start chatting</p>
+            </div>
+        </div>
+
+        <form id="loginForm">
+            <div class="field">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" autocomplete="username" required />
+            </div>
+            <div class="field">
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required />
+            </div>
+            <p class="hint">
+                Use any of: <code>omar</code>, <code>hadeer</code>, <code>adham</code>, <code>karim</code>, <code>emad</code>.
+                Password: <code>P@$$w0rd</code>
+            </p>
+            <button type="submit" id="submitBtn">
+                <span>Login</span>
+            </button>
+            <div class="error" id="error"></div>
+        </form>
+
+        <div class="footer">
+            After successful login you will be redirected to the chat page.
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('loginForm');
+        const errorEl = document.getElementById('error');
+        const submitBtn = document.getElementById('submitBtn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errorEl.textContent = '';
+            submitBtn.disabled = true;
+
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+
+            if (!username || !password) {
+                errorEl.textContent = 'Username and password are required.';
+                submitBtn.disabled = false;
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    errorEl.textContent = data.detail || 'Login failed.';
+                    submitBtn.disabled = false;
+                    return;
+                }
+
+                // Successful login – store username and redirect to chat page
+                localStorage.setItem('hra_username', username);
+                window.location.href = '/chat';
+            } catch (err) {
+                console.error(err);
+                errorEl.textContent = 'Could not reach the server. Please try again.';
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+
+</html>
+

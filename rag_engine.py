@@ -1,4 +1,14 @@
 import re
+import os
+
+# Make PyTorch / tokenizers safer on macOS (MPS issues, excessive parallelism)
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+# Safer, lighter multilingual embedding model than BAAI/bge-m3 on macOS
+EMBEDDING_MODEL_NAME = "sentence-transformers/distiluse-base-multilingual-cased-v2"
+
 import numpy as np
 import faiss
 from dataclasses import dataclass
@@ -243,21 +253,15 @@ class RAGEngine:
         articles = sum(1 for c in self.chunks if c.metadata['type'] == 'article')
         tables = sum(1 for c in self.chunks if c.metadata['type'] == 'table')
         print(f"Total chunks: {len(self.chunks)} ({articles} articles, {tables} tables)")
-        
-        # Initialize embedder and FAISS
-        print("Creating embeddings (using BAAI/bge-m3)...")
-        self.embedder = SentenceTransformer("BAAI/bge-m3")
-        
-        texts = [c.content for c in self.chunks]
-        # bge-m3 does not need 'passage:' prefix
-        embeddings = self.embedder.encode(texts, normalize_embeddings=True)
-        
-        dim = embeddings.shape[1]
-        self.faiss_index = faiss.IndexFlatIP(dim)
-        self.faiss_index.add(np.array(embeddings))
-        
+
+        # NOTE: To avoid Torch/attention-related crashes on macOS, we disable
+        # semantic embeddings for now and rely purely on BM25 keyword search.
+        print("Semantic embeddings disabled on this platform; using BM25-only retrieval.")
+
+        self.embedder = None
+        self.faiss_index = None
         self.id2chunk = {i: c for i, c in enumerate(self.chunks)}
-        
+
         # Initialize BM25
         print("Initializing BM25...")
         # BM25 Tokenizer (Better than split() - ignores punctuation like (1))
@@ -301,67 +305,31 @@ class RAGEngine:
         )
         return response.choices[0].message.content.strip()
     
-    def retrieve_chunks(self, query: str, top_k=5, k=60):
+    def retrieve_chunks(self, query: str, top_k=5, k: int = 60):
         """
-        Retrieve relevant chunks using Reciprocal Rank Fusion (RRF)
-        
-        RRF combines rankings from FAISS and BM25 using the formula:
-        RRF_score(d) = sum over all rankings( 1 / (k + rank(d)) )
-        
+        Retrieve relevant chunks.
+
+        On this macOS environment we disable Torch-based semantic embeddings
+        (which were causing crashes) and use pure BM25 keyword search.
+
         Args:
             query: Search query
             top_k: Number of chunks to return
-            k: RRF constant (default 60, typical range 30-100)
+            k: Unused (kept for backward compatibility)
         """
-        # FAISS semantic search
-        # bge-m3 does not need 'query:' prefix
-        q_emb = self.embedder.encode([query], normalize_embeddings=True)
-        
-        # Get more candidates for better fusion
-        search_k = min(top_k * 2, len(self.chunks))
-        faiss_scores, faiss_ids = self.faiss_index.search(q_emb, search_k)
-
-        # Convert FAISS results to Python native types and filter out invalid indices (-1)
-        faiss_ids_list = [int(idx) for idx in faiss_ids[0] if idx >= 0]
-
         # BM25 keyword search (Normalize query same as corpus)
         bm25_scores = self.bm25.get_scores(self.bm25_tokenizer(query))
+
+        if not bm25_scores.any():
+            return []
+
         bm25_ranking = sorted(
             range(len(bm25_scores)),
             key=lambda i: bm25_scores[i],
             reverse=True
-        )[:search_k]
+        )[:top_k]
 
-        # RRF: Reciprocal Rank Fusion
-        rrf_scores = {}
-        
-        # Add FAISS rankings to RRF
-        for rank, idx in enumerate(faiss_ids_list):
-            if idx in self.id2chunk:
-                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank + 1)
-        
-        # Add BM25 rankings to RRF
-        for rank, idx in enumerate(bm25_ranking):
-            if idx in self.id2chunk:
-                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank + 1)
-        
-        # Handle case where no chunks were retrieved
-        if not rrf_scores:
-            return []
-        
-        # Sort by RRF score (higher is better)
-        sorted_chunks = sorted(
-            rrf_scores.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        
-        # Return top-k chunks
-        return [
-            self.id2chunk[idx] 
-            for idx, score in sorted_chunks[:top_k]
-            if idx in self.id2chunk
-        ]
+        return [self.id2chunk[idx] for idx in bm25_ranking if idx in self.id2chunk]
     
     def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False):
         """Answer a question using RAG with sliding window history"""

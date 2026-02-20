@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sharjah RAG – Legal Assistant</title>
+    <title>Sharjah RAG – Human Resource Advisor</title>
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap"
         rel="stylesheet">
@@ -36,9 +36,97 @@
             background: var(--bg);
             color: var(--text);
             height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        .app-shell {
+            display: flex;
+            height: 100vh;
+            width: 100%;
+        }
+
+        .sidebar {
+            width: 260px;
+            background: #0b0d13;
+            border-left: 1px solid var(--border);
+            border-right: 1px solid var(--border);
+            padding: 16px 10px 16px 18px;
             display: flex;
             flex-direction: column;
+            gap: 12px;
+        }
+
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .sidebar-title {
+            font-size: .78rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+
+        .sidebar-username {
+            font-size: .78rem;
+            color: var(--text-muted);
+        }
+
+        .conv-list {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 4px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .conv-list::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        .conv-list::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 999px;
+        }
+
+        .conv-item {
+            padding: 8px 9px;
+            border-radius: 10px;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: .8rem;
+            cursor: pointer;
+            border: 1px solid transparent;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
             overflow: hidden;
+        }
+
+        .conv-item:hover {
+            background: #141824;
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .conv-item.active {
+            background: #1f2433;
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        .main-column {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
         }
 
         /* ── Header ── */
@@ -322,31 +410,43 @@
 
 <body>
 
-    <header>
-        <div class="logo">ش</div>
-        <div>
-            <h1>Sharjah Legal Assistant</h1>
-            <p>مساعد قانوني – الشارقة</p>
-        </div>
-        <span class="status-dot" id="statusDot"></span>
-    </header>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-title">Conversations</span>
+                <span class="sidebar-username" id="sidebarUsername"></span>
+            </div>
+            <div id="conversationList" class="conv-list"></div>
+        </aside>
 
-    <div id="chat">
-        <div class="welcome" id="welcome">
-            <div class="welcome-icon">⚖️</div>
-            <h2>مرحباً بك</h2>
-            <p>اسأل أي سؤال حول اللائحة التنفيذية للموارد البشرية لإمارة الشارقة – باللغة العربية أو الإنجليزية.</p>
-            <div class="suggestions">
-                <button onclick="useSuggestion(this)">ما هي شروط التعيين؟</button>
-                <button onclick="useSuggestion(this)">What is the probation period?</button>
-                <button onclick="useSuggestion(this)">ما هي أنواع الإجازات؟</button>
+        <div class="main-column">
+            <header>
+                <div class="logo">HR</div>
+                <div>
+                    <h1>Human Resource Advisor</h1>
+                    <p>مساعد الموارد البشرية – الشارقة</p>
+                </div>
+                <span class="status-dot" id="statusDot"></span>
+            </header>
+
+            <div id="chat">
+                <div class="welcome" id="welcome">
+                    <div class="welcome-icon">⚖️</div>
+                    <h2>مرحباً بك</h2>
+                    <p>اسأل أي سؤال حول اللائحة التنفيذية للموارد البشرية لإمارة الشارقة – باللغة العربية أو الإنجليزية.</p>
+                    <div class="suggestions">
+                        <button onclick="useSuggestion(this)">ما هي شروط التعيين؟</button>
+                        <button onclick="useSuggestion(this)">What is the probation period?</button>
+                        <button onclick="useSuggestion(this)">ما هي أنواع الإجازات؟</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-bar">
+                <textarea id="question" rows="1" placeholder="اكتب سؤالك هنا..." autofocus></textarea>
+                <button id="send" onclick="ask()">➤</button>
             </div>
         </div>
-    </div>
-
-    <div class="input-bar">
-        <textarea id="question" rows="1" placeholder="اكتب سؤالك هنا..." autofocus></textarea>
-        <button id="send" onclick="ask()">➤</button>
     </div>
 
     <script>
@@ -354,9 +454,19 @@
         const input = document.getElementById('question');
         const sendBtn = document.getElementById('send');
         const welcome = document.getElementById('welcome');
+        const sidebarUsername = document.getElementById('sidebarUsername');
+        const conversationList = document.getElementById('conversationList');
+
+        const username = localStorage.getItem('hra_username');
+        if (!username) {
+            window.location.href = '/';
+        } else {
+            sidebarUsername.textContent = username;
+        }
 
         // HISTORY tracking (Last 20 messages to cover 10 pairs)
         let chatHistory = [];
+        let activeConversationId = null;
 
         /* ── Auto-resize textarea ── */
         input.addEventListener('input', () => {
@@ -374,6 +484,53 @@
             input.value = btn.textContent;
             ask();
         }
+
+        async function loadConversations() {
+            try {
+                const res = await fetch('/api/conversations?username=' + encodeURIComponent(username));
+                if (!res.ok) return;
+                const data = await res.json();
+
+                conversationList.innerHTML = '';
+                data.forEach(conv => {
+                    const item = document.createElement('div');
+                    item.className = 'conv-item' + (conv.id === activeConversationId ? ' active' : '');
+                    item.textContent = conv.title || ('Conversation ' + conv.id);
+                    item.onclick = () => openConversation(conv.id, conv.title);
+                    conversationList.appendChild(item);
+                });
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function openConversation(id, title) {
+            try {
+                const res = await fetch('/api/conversations/' + id + '?username=' + encodeURIComponent(username));
+                if (!res.ok) return;
+                const data = await res.json();
+
+                activeConversationId = data.id;
+
+                Array.from(conversationList.children).forEach(el => {
+                    el.classList.toggle('active', el.textContent === data.title);
+                });
+
+                chat.innerHTML = '';
+                if (welcome) welcome.style.display = 'none';
+                chatHistory = [];
+
+                data.messages.forEach(m => {
+                    const role = m.role === 'assistant' ? 'bot' : 'user';
+                    addMsg(m.content, role);
+                    chatHistory.push({ role: m.role, content: m.content });
+                });
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        loadConversations();
 
         /* ── Main ask function ── */
         async function ask() {
@@ -402,7 +559,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         question: q,
-                        history: chatHistory
+                        history: chatHistory,
+                        username,
+                        conversation_id: activeConversationId
                     })
                 });
                 const data = await res.json();
@@ -415,6 +574,10 @@
 
                 if (res.ok) {
                     addMsg(data.answer, 'bot');
+                    if (!activeConversationId && data.conversation_id) {
+                        activeConversationId = data.conversation_id;
+                        loadConversations();
+                    }
                     // Add BOT message to history
                     chatHistory.push({ role: "assistant", content: data.answer });
                 } else {
