@@ -113,11 +113,18 @@ def ask(payload: AskRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     
     try:
-        # Get answer from RAG
-        answer = rag.answer_question(payload.question, history=payload.history, debug=True)
+        # Get answer and context from RAG
+        answer, context = rag.answer_question(payload.question, history=payload.history, debug=True, return_context=True)
+        
+        # Detect language to generate follow-up questions in the correct language
+        lang = rag.detect_language(payload.question)
+        
+        # Generate follow-up questions
+        follow_up_questions = rag.generate_followup_questions(payload.question, answer, context, lang)
         
         return {
-            "answer": answer
+            "answer": answer,
+            "follow_up_questions": follow_up_questions
         }
     
     except Exception as e:

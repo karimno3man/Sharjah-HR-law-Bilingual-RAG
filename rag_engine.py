@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
 import tiktoken
+import json
 
 
 @dataclass
@@ -363,7 +364,7 @@ class RAGEngine:
             if idx in self.id2chunk
         ]
     
-    def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False):
+    def answer_question(self, query: str, history: List[Dict[str, str]] = [], debug=False, return_context=False):
         """Answer a question using RAG with sliding window history"""
         
         # 1. Contextualize Query (Rewrite follow-up questions)
@@ -527,7 +528,10 @@ class RAGEngine:
             max_tokens=1500
         )
         
-        return response.choices[0].message.content
+        ans = response.choices[0].message.content
+        if return_context:
+            return ans, context
+        return ans
 
     def count_tokens(self, messages: List[Dict[str, str]], model="gpt-4o-mini") -> int:
         """Count tokens in a list of messages using tiktoken"""
@@ -578,6 +582,36 @@ Keep the same language as the user's question (Arabic or English)."""
             print(f"Contextualization failed: {e}")
             return query
     
+    def generate_followup_questions(self, query: str, answer: str, context: str, lang: str) -> List[str]:
+        """Generate predictive follow-up questions bounded by the retrieved context."""
+        system_prompt = f"""You are an assistant helping users navigate a legal document. 
+Based on the user's question, the provided answer, and ONLY the following extracted legal texts, suggest exactly 3 short follow-up questions.
+CRITICAL INSTRUCTIONS:
+- The follow-up questions MUST be answerable using ONLY the provided legal texts below. Do not ask questions about topics not mentioned in these texts.
+- Output a JSON object with a single key "questions" containing an array of 3 strings. Example: {{"questions": ["Q1?", "Q2?", "Q3?"]}}
+- The questions strictly MUST be in {"Arabic" if lang == "ar" else "English"} language.
+
+Legal Texts:
+{context}"""
+        
+        user_prompt = f"User Question: {query}\\nChatbot Answer: {answer}\\n\\nProvide the 3 follow-up questions as JSON."
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=200,
+                response_format={ "type": "json_object" }
+            )
+            result = json.loads(response.choices[0].message.content.strip())
+            return result.get("questions", [])
+        except Exception as e:
+            print(f"Follow-up generation failed: {e}")
+            return []
 
     def get_statistics(self):
         """Get statistics about the chunks"""
