@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 import io
+import sqlite3
 from openai import OpenAI
 from rag_engine import RAGEngine
 
@@ -12,6 +13,12 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "verse"
     model: str = "tts-1"
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+DB_PATH = "users.db"
 
 
 app = FastAPI(
@@ -27,6 +34,76 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def init_user_db():
+    """Initialize SQLite DB and seed dummy users."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+            )
+            """
+        )
+
+        dummy_users = ["omar", "hadeer", "adham", "karim", "emad"]
+        for username in dummy_users:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO users (username, password)
+                VALUES (?, ?)
+                """,
+                (username, "P@$$w0rd"),
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def verify_user(username: str, password: str) -> bool:
+    """Return True if username/password match a user in DB."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id FROM users WHERE username = ? AND password = ?",
+            (username, password),
+        )
+        row = cur.fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
 # Serve static assets (CSS / JS / images if you add them later)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -37,6 +114,9 @@ rag = None
 async def startup_event():
     """Initialize RAG engine on startup"""
     global rag
+    
+    # Initialize the user database
+    init_user_db()
     
     # Get OpenAI API key from environment variable
     openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -53,14 +133,31 @@ async def startup_event():
     print(f"RAG engine loaded successfully! Total chunks: {len(rag.chunks)}")
 
 
+from typing import Optional
+
 class AskRequest(BaseModel):
     question: str
+    username: str
+    conversation_id: Optional[int] = None
 
 
 @app.get("/")
 def root():
+    """Serve the root UI (login page)"""
+    return FileResponse("static/login.html")
+
+@app.get("/chat")
+def chat_ui():
     """Serve the chat UI"""
-    return FileResponse("static/index.html")
+    return FileResponse("static/chat.html")
+
+@app.post("/api/login")
+def login(payload: LoginRequest):
+    """API endpoint to validate user credentials"""
+    if verify_user(payload.username, payload.password):
+        return {"status": "success", "message": "Login successful"}
+    else:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
 
 
 @app.get("/api/info")
@@ -105,24 +202,105 @@ def stats():
 
 @app.post('/ask')
 def ask(payload: AskRequest):
-    """Main RAG endpoint - answer questions"""
+    """Main RAG endpoint - answer questions and persist history"""
     if rag is None:
         raise HTTPException(status_code=503, detail="RAG engine not initialized")
     
     # Validate input
     if not payload.question or not payload.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
-    
+        
+    conn = sqlite3.connect(DB_PATH)
     try:
+        cur = conn.cursor()
+        
+        # Get user ID
+        cur.execute("SELECT id FROM users WHERE username = ?", (payload.username,))
+        user_row = cur.fetchone()
+        if not user_row:
+            raise HTTPException(status_code=401, detail="User not found")
+        user_id = user_row[0]
+        
+        # Handle conversation creation
+        from datetime import datetime
+        now = datetime.now().isoformat()
+        conv_id = payload.conversation_id
+        
+        if not conv_id:
+            # Create a new conversation title from a snippet of the question
+            title = payload.question[:30] + "..." if len(payload.question) > 30 else payload.question
+            cur.execute(
+                "INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (user_id, title, now, now)
+            )
+            conv_id = cur.lastrowid
+        else:
+            # Update the existing conversation's updated_at timestamp
+            cur.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conv_id))
+            
+        # Insert user message
+        cur.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (conv_id, "user", payload.question, now)
+        )
+            
         # Get answer from RAG
         answer = rag.answer_question(payload.question)
         
+        # Insert assistant message
+        answer_now = datetime.now().isoformat()
+        cur.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (conv_id, "assistant", answer, answer_now)
+        )
+        
+        conn.commit()
+        
         return {
-            "answer": answer
+            "answer": answer,
+            "conversation_id": conv_id
         }
     
     except Exception as e:
+        conn.rollback()
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+    finally:
+        conn.close()
+
+@app.get("/api/conversations")
+def get_conversations(username: str):
+    """Get all conversations for a specific user"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username = ?", (username,))
+        user_row = cur.fetchone()
+        if not user_row:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        cur.execute(
+            "SELECT id, title, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_row[0],)
+        )
+        rows = cur.fetchall()
+        return [{"id": row[0], "title": row[1], "updated_at": row[2]} for row in rows]
+    finally:
+        conn.close()
+
+@app.get("/api/conversations/{conv_id}/messages")
+def get_messages(conv_id: int):
+    """Get all messages for a specific conversation"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+            (conv_id,)
+        )
+        rows = cur.fetchall()
+        return [{"id": row[0], "role": row[1], "content": row[2], "created_at": row[3]} for row in rows]
+    finally:
+        conn.close()
 
 
 # New endpoint sketch

@@ -523,14 +523,9 @@ class RAGEngine:
 
         messages = [
             {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_prompt}
         ]
 
-        # Inject recent conversation history before the current user prompt
-        if self.conversation_history:
-            messages.extend(self.conversation_history[-self.max_history_turns:])
-
-        messages.append({"role": "user", "content": user_prompt})
-        
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -541,7 +536,7 @@ class RAGEngine:
         answer = response.choices[0].message.content
 
         # Save this turn to conversation history
-        self.conversation_history.append({"role": "user", "content": query})
+        self.conversation_history.append({"role": "user", "content": standalone_query})
         self.conversation_history.append({"role": "assistant", "content": answer})
 
         # Trim history to max window
