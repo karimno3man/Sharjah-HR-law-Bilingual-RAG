@@ -245,7 +245,13 @@ def ask(payload: AskRequest):
         )
             
         # Get answer from RAG
-        answer = rag.answer_question(payload.question)
+        answer, context = rag.answer_question(payload.question, debug=True, return_context=True)
+        
+        # Detect language
+        lang = rag.detect_language(payload.question)
+        
+        # Generate follow-ups
+        follow_up_questions = rag.generate_followup_questions(payload.question, answer, context, lang)
         
         # Insert assistant message
         answer_now = datetime.now().isoformat()
@@ -258,7 +264,8 @@ def ask(payload: AskRequest):
         
         return {
             "answer": answer,
-            "conversation_id": conv_id
+            "conversation_id": conv_id,
+            "follow_up_questions": follow_up_questions
         }
     
     except Exception as e:

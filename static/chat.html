@@ -377,6 +377,35 @@
             box-shadow: 0 0 12px var(--accent-glow);
         }
 
+        /* ── Follow ups ── */
+        .follow-ups {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+            margin-bottom: 8px;
+            align-self: flex-start;
+            max-width: 85%;
+        }
+
+        .follow-ups button {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--accent);
+            padding: 8px 14px;
+            border-radius: 12px;
+            font-size: .82rem;
+            cursor: pointer;
+            transition: all .2s;
+            font-family: inherit;
+        }
+
+        .follow-ups button:hover {
+            background: var(--surface-hover);
+            border-color: var(--accent);
+            box-shadow: 0 0 8px var(--accent-glow);
+        }
+
         /* ── Input bar ── */
         .input-bar {
             display: flex;
@@ -492,11 +521,11 @@
                     <button onclick="useSuggestion(this)">ما هي أنواع الإجازات؟</button>
                 </div>
             </div>
+        </div>
 
-            <div class="input-bar">
-                <textarea id="question" rows="1" placeholder="اكتب سؤالك هنا..." autofocus></textarea>
-                <button id="send" onclick="ask()">➤</button>
-            </div>
+        <div class="input-bar">
+            <textarea id="question" rows="1" placeholder="اكتب سؤالك هنا..." autofocus></textarea>
+            <button id="send" onclick="ask()">➤</button>
         </div>
 
         <script>
@@ -589,7 +618,7 @@
             }
 
             /* ── Add message bubble ── */
-            function addMsg(text, role) {
+            function addMsg(text, role, followUps = null) {
                 const div = document.createElement('div');
                 div.className = 'msg ' + role;
 
@@ -608,6 +637,24 @@
                 }
 
                 chat.appendChild(div);
+
+                if (followUps && followUps.length > 0) {
+                    const fuDiv = document.createElement('div');
+                    fuDiv.className = 'follow-ups';
+                    followUps.forEach(q => {
+                        const btn = document.createElement('button');
+                        btn.textContent = q;
+                        btn.onclick = () => {
+                            input.value = q;
+                            ask();
+                            fuDiv.style.opacity = '0.5';
+                            fuDiv.style.pointerEvents = 'none';
+                        };
+                        fuDiv.appendChild(btn);
+                    });
+                    chat.appendChild(fuDiv);
+                }
+
                 chat.scrollTop = chat.scrollHeight;
             }
 
@@ -709,7 +756,7 @@
 
                     if (res.ok) {
                         currentConversationId = data.conversation_id;
-                        addMsg(data.answer, 'bot');
+                        addMsg(data.answer, 'bot', data.follow_up_questions);
                         chatHistory.push({ role: 'assistant', content: data.answer });
                         loadConversations(); // Refresh sidebar title if new!
                     } else {
