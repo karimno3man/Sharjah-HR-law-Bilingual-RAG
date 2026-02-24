@@ -6,9 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 import io
+import wave
 import sqlite3
+import speech_recognition as sr
 from openai import OpenAI
 from rag_engine import RAGEngine
+
+recognizer = sr.Recognizer()
 
 class TTSRequest(BaseModel):
     text: str
@@ -323,3 +327,37 @@ async def text_to_speech(payload: TTSRequest):
     audio_bytes = response.content
     return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/mpeg")
 
+# STT endpoint
+@app.get("/listen")
+def speech_to_text():
+    try:
+        mic = sr.Microphone(sample_rate=16000)
+        with mic as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.2)
+            audio = recognizer.listen(source, phrase_time_limit=10)
+
+        pcm_bytes = audio.get_raw_data()
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(pcm_bytes)
+        wav_buffer.seek(0)
+        wav_buffer.name = "audio.wav"
+
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        result = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=wav_buffer,
+            response_format="verbose_json"
+        )
+
+        print(f"Detected Language: {result.language}")
+        print(f"Text: {result.text}")
+
+        return {"language": result.language, "text": result.text}
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return {"error": str(e)}
