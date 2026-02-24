@@ -1,3 +1,4 @@
+
 import re
 import numpy as np
 import faiss
@@ -6,6 +7,7 @@ from typing import List, Dict
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
+import json
 
 
 @dataclass
@@ -265,6 +267,10 @@ class RAGEngine:
         # Initialize OpenAI client
         self.client = OpenAI(api_key=openai_api_key)
         
+        # Conversation memory (current session only)
+        self.conversation_history: List[Dict] = []
+        self.max_history_turns = 6  # Keep last 6 turns (3 Q&A pairs)
+        
         print("✅ RAG engine ready!")
     
     def detect_language(self, text: str) -> str:
@@ -296,6 +302,49 @@ class RAGEngine:
         )
         return response.choices[0].message.content.strip()
     
+    def rewrite_query_with_history(self, query: str) -> str:
+        """
+        If there's conversation history, rewrite the query as a fully standalone question.
+        This ensures follow-up questions like 'what about exceptions?' retrieve correctly.
+        """
+        if not self.conversation_history:
+            return query  # No history yet, use query as-is
+        
+        # Build a compact history string
+        history_text = ""
+        for turn in self.conversation_history[-self.max_history_turns:]:
+            role = "User" if turn["role"] == "user" else "Assistant"
+            history_text += f"{role}: {turn['content']}\n"
+        
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a query rewriter. Given a conversation history and a follow-up question, "
+                        "rewrite the follow-up question as a single, fully self-contained question "
+                        "that includes all necessary context from the history. "
+                        "Output ONLY the rewritten question, nothing else. "
+                        "Keep the same language as the follow-up question."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Conversation history:\n{history_text}\nFollow-up question: {query}\n\nRewritten standalone question:"
+                }
+            ],
+            temperature=0,
+            max_tokens=200
+        )
+        rewritten = response.choices[0].message.content.strip()
+        return rewritten
+
+    def clear_history(self):
+        """Clear conversation history to start a fresh session."""
+        self.conversation_history = []
+        print("🗑️ Conversation history cleared.")
+
     def retrieve_chunks(self, query: str, top_k=5, k=60):
         """
         Retrieve relevant chunks using Reciprocal Rank Fusion (RRF)
@@ -358,50 +407,51 @@ class RAGEngine:
             if idx in self.id2chunk
         ]
     
-    def answer_question(self, query: str, history: list, debug=False):
-        """Answer a question using RAG with sliding window chat history (last 5 exchanges)"""
-
+    def answer_question(self, query: str, debug=False, return_context=False):
+        """Answer a question using RAG with conversation memory."""
         # Detect original language
         original_lang = self.detect_language(query)
+
+        # Step 1: Rewrite query using conversation history for better retrieval
+        standalone_query = self.rewrite_query_with_history(query)
+        if debug and standalone_query != query:
+            print(f"[DEBUG] Original query: '{query}'")
+            print(f"[DEBUG] Rewritten query: '{standalone_query}'")
 
         # Translate to Arabic if needed for better retrieval
         if original_lang == "en":
             if debug:
-                print(f"[DEBUG] English query detected: '{query}'")
-            arabic_query = self.translate_to_arabic(query)
+                print(f"[DEBUG] English query detected: '{standalone_query}'")
+            arabic_query = self.translate_to_arabic(standalone_query)
             if debug:
                 print(f"[DEBUG] Translated to Arabic: '{arabic_query}'")
             retrieval_query = arabic_query
         else:
-            retrieval_query = query
+            retrieval_query = standalone_query
 
         # Retrieve chunks
         retrieved = self.retrieve_chunks(retrieval_query, top_k=10)
-
+        
         # Handle case where no chunks were retrieved
         if not retrieved:
-            no_answer = (
-                "عذراً، لم أتمكن من العثور على معلومات ذات صلة بسؤالك في الوثيقة."
-                if original_lang == "ar"
-                else "Sorry, I couldn't find relevant information for your question in the document."
-            )
-            history.append({"role": "user", "content": query})
-            history.append({"role": "assistant", "content": no_answer})
-            return no_answer
-
+            if original_lang == "ar":
+                return "عذراً، لم أتمكن من العثور على معلومات ذات صلة بسؤالك في الوثيقة."
+            else:
+                return "Sorry, I couldn't find relevant information for your question in the document."
+        
         if debug:
             print(f"\n[DEBUG] Retrieved {len(retrieved)} chunks:")
             for i, c in enumerate(retrieved[:5], 1):
                 subsection = f" ({c.metadata.get('subsection')})" if c.metadata.get('subsection') else ""
                 print(f"  {i}. {c.metadata['header']}{subsection}")
                 print(f"     Size: {c.metadata['chunk_size']} chars")
-
+        
         # Build context
         context = "\n\n".join(
             f"[{c.metadata['header']}]\n{c.content}"
             for c in retrieved
         )
-
+        
         # Generate answer in original language
         if original_lang == "ar":
             system_msg = """أنت مساعد قانوني متخصص.
@@ -417,7 +467,7 @@ class RAGEngine:
             - عدم تكرار أي نقطة.
             - عرض الإجابة في نقاط واضحة إذا كانت موجودة كنقاط في النص.
 
-        """
+           """
 
             user_prompt = f"""النصوص القانونية:
 
@@ -473,15 +523,10 @@ class RAGEngine:
 
             Provide your final answer now in English."""
 
-        # Build messages with sliding window history (last 5 exchanges = 10 messages)
-        messages = [{"role": "system", "content": system_msg}]
-
-        # Append the last 5 exchanges from history
-        window = history[-10:]  
-        messages.extend(window)
-
-        # Append the current user prompt
-        messages.append({"role": "user", "content": user_prompt})
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_prompt}
+        ]
 
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
@@ -489,15 +534,51 @@ class RAGEngine:
             temperature=0.3,
             max_tokens=1500
         )
-
+        
         answer = response.choices[0].message.content
 
-        # Save current exchange to history
-        history.append({"role": "user", "content": query})
-        history.append({"role": "assistant", "content": answer})
+        # Save this turn to conversation history
+        self.conversation_history.append({"role": "user", "content": standalone_query})
+        self.conversation_history.append({"role": "assistant", "content": answer})
 
+        # Trim history to max window
+        if len(self.conversation_history) > self.max_history_turns:
+            self.conversation_history = self.conversation_history[-self.max_history_turns:]
+
+        if return_context:
+            return answer, context
         return answer
     
+    def generate_followup_questions(self, query: str, answer: str, context: str, lang: str) -> List[str]:
+        """Generate predictive follow-up questions bounded by the retrieved context."""
+        system_prompt = f"""You are an assistant helping users navigate a legal document. 
+Based on the user's question, the provided answer, and ONLY the following extracted legal texts, suggest exactly 3 short follow-up questions.
+CRITICAL INSTRUCTIONS:
+- The follow-up questions MUST be answerable using ONLY the provided legal texts below. Do not ask questions about topics not mentioned in these texts.
+- Output a JSON object with a single key "questions" containing an array of 3 strings. Example: {{"questions": ["Q1?", "Q2?", "Q3?"]}}
+- The questions strictly MUST be in {"Arabic" if lang == "ar" else "English"} language.
+
+Legal Texts:
+{context}"""
+        
+        user_prompt = f"User Question: {query}\\nChatbot Answer: {answer}\\n\\nProvide the 3 follow-up questions as JSON."
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=200,
+                response_format={ "type": "json_object" }
+            )
+            result = json.loads(response.choices[0].message.content.strip())
+            return result.get("questions", [])
+        except Exception as e:
+            print(f"Follow-up generation failed: {e}")
+            return []
     def get_statistics(self):
         """Get statistics about the chunks"""
         total_chunks = len(self.chunks)
@@ -552,15 +633,12 @@ if __name__ == "__main__":
     print("EXAMPLE QUERIES")
     print("="*80)
     
-    # Shared history list across calls
-    history = []
-
     # Arabic query
     print("\n1. Arabic query:")
-    answer = engine.answer_question("ما هي الإجازة الدورية للموظف؟", history=history, debug=True)
+    answer = engine.answer_question("ما هي الإجازة الدورية للموظف؟", debug=True)
     print(f"\nAnswer: {answer}")
-
+    
     # English query
     print("\n\n2. English query:")
-    answer = engine.answer_question("What is the annual leave entitlement?", history=history, debug=True)
+    answer = engine.answer_question("What is the annual leave entitlement?", debug=True)
     print(f"\nAnswer: {answer}")

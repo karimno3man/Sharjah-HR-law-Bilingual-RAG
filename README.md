@@ -29,6 +29,32 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 Open http://localhost:8000 in your browser.
 
+## Run with Docker
+
+If you prefer to run the project using Docker, follow these steps:
+
+1. Create a `.env` file in the project root directory and add your OpenAI API key:
+   ```env
+   OPENAI_API_KEY=sk-your-api-key-here
+   ```
+
+2. Build the Docker containers:
+   ```bash
+   docker-compose build
+   ```
+
+3. Start the application:
+   ```bash
+   docker-compose up
+   ```
+
+4. After starting the containers, open [http://localhost:8000](http://localhost:8000) in your browser to access the chat interface.
+
+5. Stop the application when needed:
+   ```bash
+   docker-compose down
+   ```
+
 ## Project Structure
 
 ```

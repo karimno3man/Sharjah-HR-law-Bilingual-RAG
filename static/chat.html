@@ -377,21 +377,44 @@
             box-shadow: 0 0 12px var(--accent-glow);
         }
 
+        /* ── Follow ups ── */
+        .follow-ups {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+            margin-bottom: 8px;
+            align-self: flex-start;
+            max-width: 85%;
+        }
+
+        .follow-ups button {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--accent);
+            padding: 8px 14px;
+            border-radius: 12px;
+            font-size: .82rem;
+            cursor: pointer;
+            transition: all .2s;
+            font-family: inherit;
+        }
+
+        .follow-ups button:hover {
+            background: var(--surface-hover);
+            border-color: var(--accent);
+            box-shadow: 0 0 8px var(--accent-glow);
+        }
+
         /* ── Input bar ── */
         .input-bar {
             display: flex;
-            flex-direction: column;
-            padding: 0 20px 16px;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 20px;
             background: var(--surface);
             border-top: 1px solid var(--border);
             flex-shrink: 0;
-        }
-
-        .input-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding-top: 16px;
         }
 
         #question {
@@ -443,72 +466,6 @@
             opacity: .4;
             cursor: not-allowed;
             transform: none;
-        }
-
-        /* ── Mic button ── */
-        #micBtn {
-            width: 48px;
-            height: 48px;
-            border-radius: 14px;
-            border: 1px solid var(--border);
-            background: transparent;
-            color: var(--text-muted);
-            font-size: 1.2rem;
-            cursor: pointer;
-            display: grid;
-            place-items: center;
-            transition: all .2s;
-            flex-shrink: 0;
-        }
-
-        #micBtn:hover {
-            border-color: var(--accent);
-            color: var(--text);
-            box-shadow: 0 0 8px var(--accent-glow);
-        }
-
-        #micBtn.listening {
-            border-color: #ef4444;
-            color: #ef4444;
-            animation: micPulse 1s ease-in-out infinite;
-        }
-
-        #micBtn:disabled {
-            opacity: .5;
-            cursor: not-allowed;
-            animation: none;
-        }
-
-        @keyframes micPulse {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .5); }
-            50%       { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
-        }
-
-        /* ── STT status bar ── */
-        #sttStatus {
-            display: none;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 0 0;
-            font-size: .8rem;
-            color: #ef4444;
-        }
-
-        #sttStatus.visible {
-            display: flex;
-        }
-
-        #sttStatus.error {
-            color: #f97316;
-        }
-
-        .stt-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: currentColor;
-            flex-shrink: 0;
-            animation: pulse 1s infinite;
         }
 
         /* ── Responsive ── */
@@ -567,15 +524,8 @@
         </div>
 
         <div class="input-bar">
-            <div id="sttStatus">
-                <span class="stt-dot"></span>
-                <span id="sttStatusText">جارٍ الاستماع...</span>
-            </div>
-            <div class="input-row">
-                <textarea id="question" rows="1" placeholder="اكتب سؤالك هنا..." autofocus></textarea>
-                <button id="micBtn" onclick="startListening()" title="تحدث / Speak">🎙️</button>
-                <button id="send" onclick="ask()">➤</button>
-            </div>
+            <textarea id="question" rows="1" placeholder="اكتب سؤالك هنا..." autofocus></textarea>
+            <button id="send" onclick="ask()">➤</button>
         </div>
 
         <script>
@@ -584,9 +534,6 @@
             const sendBtn = document.getElementById('send');
             const welcome = document.getElementById('welcome');
             const convList = document.getElementById('convList');
-            const micBtn = document.getElementById('micBtn');
-            const sttStatus = document.getElementById('sttStatus');
-            const sttStatusText = document.getElementById('sttStatusText');
 
             let chatHistory = [];
             let currentAudio = null;
@@ -671,7 +618,7 @@
             }
 
             /* ── Add message bubble ── */
-            function addMsg(text, role) {
+            function addMsg(text, role, followUps = null) {
                 const div = document.createElement('div');
                 div.className = 'msg ' + role;
 
@@ -690,6 +637,24 @@
                 }
 
                 chat.appendChild(div);
+
+                if (followUps && followUps.length > 0) {
+                    const fuDiv = document.createElement('div');
+                    fuDiv.className = 'follow-ups';
+                    followUps.forEach(q => {
+                        const btn = document.createElement('button');
+                        btn.textContent = q;
+                        btn.onclick = () => {
+                            input.value = q;
+                            ask();
+                            fuDiv.style.opacity = '0.5';
+                            fuDiv.style.pointerEvents = 'none';
+                        };
+                        fuDiv.appendChild(btn);
+                    });
+                    chat.appendChild(fuDiv);
+                }
+
                 chat.scrollTop = chat.scrollHeight;
             }
 
@@ -754,39 +719,6 @@
                 }
             }
 
-            /* ── STT / Mic ── */
-            async function startListening() {
-                if (micBtn.disabled) return;
-
-                micBtn.classList.add('listening');
-                micBtn.disabled = true;
-                sttStatus.className = 'visible';
-                sttStatusText.textContent = 'جارٍ الاستماع...';
-
-                try {
-                    const res = await fetch('/listen');
-                    const data = await res.json();
-
-                    if (data.text) {
-                        input.value = data.text;
-                        input.dispatchEvent(new Event('input')); // trigger auto-resize
-                        input.focus();
-                    } else if (data.error) {
-                        sttStatus.className = 'visible error';
-                        sttStatusText.textContent = 'خطأ: ' + data.error;
-                        await new Promise(r => setTimeout(r, 3000));
-                    }
-                } catch (err) {
-                    sttStatus.className = 'visible error';
-                    sttStatusText.textContent = 'تعذّر الاتصال بالخادم';
-                    await new Promise(r => setTimeout(r, 3000));
-                } finally {
-                    micBtn.classList.remove('listening');
-                    micBtn.disabled = false;
-                    sttStatus.className = '';
-                }
-            }
-
             /* ── Main ask function ── */
             async function ask() {
                 const q = input.value.trim();
@@ -824,7 +756,7 @@
 
                     if (res.ok) {
                         currentConversationId = data.conversation_id;
-                        addMsg(data.answer, 'bot');
+                        addMsg(data.answer, 'bot', data.follow_up_questions);
                         chatHistory.push({ role: 'assistant', content: data.answer });
                         loadConversations(); // Refresh sidebar title if new!
                     } else {
