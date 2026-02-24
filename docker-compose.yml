@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: sharjah-rag-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # We map the local users.db to the container to persist user data and conversations
+      - ./users.db:/app/users.db
+    env_file:
+      # This passes the OPENAI_API_KEY from your local .env to the container
+      - .env
+    restart: unless-stopped
